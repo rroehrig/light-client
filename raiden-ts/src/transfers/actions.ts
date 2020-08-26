@@ -1,6 +1,5 @@
 /* eslint-disable @typescript-eslint/no-namespace */
 import * as t from 'io-ts';
-import invert from 'lodash/invert';
 
 import { Address, UInt, Int, Secret, Hash, Signed } from '../utils/types';
 import { createAction, ActionType, createAsyncAction } from '../utils/actions';
@@ -18,9 +17,8 @@ import {
   WithdrawExpired,
 } from '../messages/types';
 import { Paths } from '../services/types';
-import { Direction } from './state';
+import { DirectionC } from './state';
 
-const DirectionC = t.keyof(invert(Direction) as Record<Direction, string>);
 const TransferId = t.type({
   secrethash: Hash,
   direction: DirectionC,
@@ -160,7 +158,7 @@ export interface transferUnlockProcessed extends ActionType<typeof transferUnloc
  *
  * A transfer expiration request may fail for any reason
  * e.g. user rejected sign prompt. It should eventually get prompted again, on a future newBlock
- * action which sees this transfer should be expired but sent.lockExpired didn't get set yet.
+ * action which sees this transfer should be expired but sent.expired didn't get set yet.
  */
 export const transferExpire = createAsyncAction(
   TransferId,

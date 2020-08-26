@@ -1,5 +1,6 @@
 import * as t from 'io-ts';
 import { BigNumber } from 'ethers/utils';
+import invert from 'lodash/invert';
 
 import {
   LockedTransfer,
@@ -7,7 +8,6 @@ import {
   SecretReveal,
   Unlock,
   LockExpired,
-  RefundTransfer,
   Metadata,
   SecretRequest,
 } from '../messages/types';
@@ -19,6 +19,7 @@ export const Direction = {
   RECEIVED: 'received',
 } as const;
 export type Direction = typeof Direction[keyof typeof Direction];
+export const DirectionC = t.keyof(invert(Direction) as { [D in Direction]: string });
 
 /**
  * This struct holds the relevant messages exchanged in a transfer
@@ -27,26 +28,23 @@ export type Direction = typeof Direction[keyof typeof Direction];
 const _TransferState = t.readonly(
   t.intersection([
     t.type({
+      _id: t.string, // transferKey
+      channel: t.string, // channelUniqueKey
+      direction: DirectionC,
+      secrethash: Hash,
+      expiration: t.number,
       /** -> outgoing locked transfer */
       transfer: Timed(Signed(LockedTransfer)),
       fee: Int(32),
       partner: Address,
     }),
     t.partial({
-      /**
-       * Transfer secret, if known
-       * registerBlock is 0 if not yet registered on-chain
-       */
-      secret: Timed(t.type({ value: Secret, registerBlock: t.number })),
+      /** Transfer secret, if known */
+      secret: Secret,
+      /** Set iff secret got registered on-chain on a block before transfer expiration */
+      secretRegistered: Timed(t.type({ txHash: Hash, txBlock: t.number })),
       /** <- incoming processed for locked transfer */
       transferProcessed: Timed(Signed(Processed)),
-      /**
-       * <- incoming refund transfer (if so)
-       * If this is set, transfer failed and partner tried refunding the transfer to us. We don't
-       * handle receiving transfers, but just store it here to mark this transfer as failed with a
-       * refund, until the lock expires normally
-       */
-      refund: Timed(Signed(RefundTransfer)),
       /**
        * !! channel was closed !!
        * In the case a channel is closed (possibly middle transfer), this will be the txHash of the
@@ -75,7 +73,7 @@ const _TransferState = t.readonly(
        * If this is set, transfer failed, and we expired the lock (retrieving the locked amount).
        * Transfer failed may not have completed yet, e.g. waiting for LockExpired's Processed reply
        */
-      lockExpired: Timed(Signed(LockExpired)),
+      expired: Timed(Signed(LockExpired)),
       /**
        * <- incoming processed for Unlock message
        * If this is set, the protocol completed by the transfer succeeding and partner
@@ -87,7 +85,7 @@ const _TransferState = t.readonly(
        * If this is set, the protocol completed by the transfer failing and partner acknowledging
        * this transfer can't be claimed anymore
        */
-      lockExpiredProcessed: Timed(Signed(Processed)),
+      expiredProcessed: Timed(Signed(Processed)),
     }),
   ]),
 );
@@ -95,16 +93,9 @@ export interface TransferState extends t.TypeOf<typeof _TransferState> {}
 export interface TransferStateC extends t.Type<TransferState, t.OutputOf<typeof _TransferState>> {}
 export const TransferState: TransferStateC = _TransferState;
 
-/**
- * Mapping of outgoing transfers, indexed by the secrethash
- */
-export const TransfersState = t.readonly(t.record(t.string /* secrethash: Hash */, TransferState));
-export interface TransfersState extends t.TypeOf<typeof TransfersState> {}
-
 export enum RaidenTransferStatus {
   pending = 'PENDING', // transfer was just sent
   received = 'RECEIVED', // transfer acknowledged by partner
-  refunded = 'REFUNDED', // partner informed that can't forward transfer
   closed = 'CLOSED', // channel closed before revealing
   requested = 'REQUESTED', // secret requested by target
   revealed = 'REVEALED', // secret revealed to target
