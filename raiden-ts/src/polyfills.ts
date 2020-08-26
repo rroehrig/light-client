@@ -1,6 +1,7 @@
 import 'symbol-observable';
 import 'isomorphic-fetch';
 import 'abort-controller/polyfill';
+import { EventEmitter } from 'events';
 
 // matrix-js-sdk monkey-patch root methodFactory
 import logging from 'loglevel';
@@ -34,3 +35,5 @@ if (!('RTCPeerConnection' in globalThis)) {
 // ugly, but there's no option to prevent MatrixClient to handle m.call.* events
 import * as call from 'matrix-js-sdk/lib/webrtc/call';
 Object.assign(call, { createNewMatrixCall: () => null });
+
+EventEmitter.defaultMaxListeners = 30;
