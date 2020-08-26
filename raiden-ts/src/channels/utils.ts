@@ -44,9 +44,9 @@ import { ChannelKey, ChannelUniqueKey } from './types';
 export function channelKey<
   C extends { tokenNetwork: Address } & ({ partner: { address: Address } } | { partner: Address })
 >({ tokenNetwork, partner }: C): ChannelKey {
-  return `${
-    typeof partner === 'string' ? partner : (partner as { address: Address }).address
-  }@${tokenNetwork}`;
+  const partnerAddr =
+    typeof partner === 'string' ? partner : (partner as { address: Address }).address;
+  return `${tokenNetwork}@${partnerAddr}`;
 }
 
 /**
@@ -61,7 +61,7 @@ export function channelUniqueKey<
     | { partner: Address }
   )
 >(channel: C): ChannelUniqueKey {
-  return `${channel.id}#${channelKey(channel)}`;
+  return `${channelKey(channel)}#${channel.id.toString().padStart(9, '0')}`;
 }
 
 /**
@@ -244,7 +244,7 @@ export function groupChannel$(state$: Observable<RaidenState>) {
     // immediately if resubscribed or withLatestFrom'd
     groupBy(channelUniqueKey, undefined, undefined, () => new ReplaySubject<Channel>(1)),
     map((grouped$) => {
-      const [_id, key] = grouped$.key.split('#');
+      const [key, _id] = grouped$.key.split('#');
       const id = +_id;
       return grouped$.pipe(
         takeUntil(
