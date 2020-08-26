@@ -28,6 +28,7 @@ import { pfsListUpdated, udcDeposit } from './services/actions';
 import { Address, UInt } from './utils/types';
 import { isActionOf } from './utils/actions';
 
+import * as DatabaseEpics from './db/epics';
 import * as ChannelsEpics from './channels/epics';
 import * as TransportEpics from './transport/epics';
 import * as TransfersEpics from './transfers/epics';
@@ -137,6 +138,7 @@ export function getLatest$(
 }
 
 const RaidenEpics = {
+  ...DatabaseEpics,
   ...ChannelsEpics,
   ...TransportEpics,
   ...TransfersEpics,
