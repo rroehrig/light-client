@@ -1,17 +1,12 @@
-import { defer, from, Observable, of } from 'rxjs';
-import { concatMap, filter, map, mergeMap, tap } from 'rxjs/operators';
+import { defer, from, Observable } from 'rxjs';
+import { filter, map, mergeMap } from 'rxjs/operators';
 
 import { RaidenAction } from '../../actions';
 import { messageSend } from '../../messages/actions';
-import { MessageType, Processed, RefundTransfer } from '../../messages/types';
-import {
-  getBalanceProofFromEnvelopeMessage,
-  signMessage,
-  isMessageReceivedOfType,
-} from '../../messages/utils';
+import { Processed } from '../../messages/types';
+import { getBalanceProofFromEnvelopeMessage, isMessageReceivedOfType } from '../../messages/utils';
 import { RaidenState } from '../../state';
 import { RaidenEpicDeps } from '../../types';
-import { LruCache } from '../../utils/lru';
 import { Signed, isntNil, decode } from '../../utils/types';
 import { isActionOf } from '../../utils/actions';
 import { TransferStateish } from '../../db/types';
@@ -124,57 +119,3 @@ export const transferProcessedSendEpic = (
       ),
     ),
   );
-
-/**
- * Sends Processed for unhandled nonce'd messages
- *
- * We don't yet support receiving nor mediating transfers (LockedTransfer, RefundTransfer), but
- * also don't want the partner to keep retrying any messages intended for us indefinitely.
- * That's why we decided to just answer them with Processed, to clear their queue. Of course, we
- * still don't validate, store state for these messages nor handle them in any way (e.g. requesting
- * secret from initiator), so any transfer is going to expire, and then we also reply Processed for
- * the respective LockExpired.
- * Additionally, we hook in sending Processed for other messages which contain nonces (and require
- * Processed reply to stop being retried) but are safe to be ignored, like WithdrawExpired.
- *
- * @param action$ - Observable of messageReceived actions
- * @param state$ - Observable of RaidenStates
- * @param deps - RaidenEpicDeps members
- * @param deps.log - Logger instance
- * @param deps.signer - Signer instance
- * @returns Observable of messageSend.request actions
- */
-export const transferReceivedReplyProcessedEpic = (
-  action$: Observable<RaidenAction>,
-  {}: Observable<RaidenState>,
-  { log, signer }: RaidenEpicDeps,
-): Observable<messageSend.request> => {
-  const cache = new LruCache<string, Signed<Processed>>(32);
-  return action$.pipe(
-    filter(isMessageReceivedOfType(Signed(RefundTransfer))),
-    concatMap((action) => {
-      const message = action.payload.message;
-      // defer causes the cache check to be performed at subscription time
-      return defer(() => {
-        const msgId = message.message_identifier;
-        const key = msgId.toString();
-        const cached = cache.get(key);
-        if (cached)
-          return of(
-            messageSend.request({ message: cached }, { address: action.meta.address, msgId: key }),
-          );
-
-        const processed: Processed = {
-          type: MessageType.PROCESSED,
-          message_identifier: msgId,
-        };
-        return from(signMessage(signer, processed, { log })).pipe(
-          tap((signed) => cache.put(key, signed)),
-          map((signed) =>
-            messageSend.request({ message: signed }, { address: action.meta.address, msgId: key }),
-          ),
-        );
-      });
-    }),
-  );
-};

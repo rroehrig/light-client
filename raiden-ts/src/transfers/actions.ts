@@ -11,7 +11,6 @@ import {
   SecretReveal,
   Unlock,
   LockExpired,
-  RefundTransfer,
   WithdrawRequest,
   WithdrawConfirmation,
   WithdrawExpired,
@@ -182,14 +181,6 @@ export const transferExpireProcessed = createAction(
   TransferId,
 );
 export interface transferExpireProcessed extends ActionType<typeof transferExpireProcessed> {}
-
-/** A transfer was refunded */
-export const transferRefunded = createAction(
-  'transfer/refunded',
-  t.type({ message: Signed(RefundTransfer), partner: Address }),
-  TransferId,
-);
-export interface transferRefunded extends ActionType<typeof transferRefunded> {}
 
 // Withdraw actions
 
