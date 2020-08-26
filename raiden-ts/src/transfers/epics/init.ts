@@ -1,12 +1,13 @@
-import { from, Observable, merge, of, EMPTY } from 'rxjs';
-import { filter, first, mergeMap, pluck, take, mergeMapTo } from 'rxjs/operators';
+import { from, Observable, merge, of, EMPTY, defer } from 'rxjs';
+import { filter, mergeMap, pluck, take, mergeMapTo } from 'rxjs/operators';
 
 import { Capabilities } from '../../constants';
 import { RaidenAction } from '../../actions';
 import { RaidenState } from '../../state';
 import { RaidenEpicDeps } from '../../types';
 import { matrixPresence } from '../../transport/actions';
-import { Hash, untime } from '../../utils/types';
+import { untime, decode } from '../../utils/types';
+import { TransferStateish } from '../../db/types';
 import {
   transferExpire,
   transferSigned,
@@ -15,55 +16,66 @@ import {
   transferSecretReveal,
   transferSecret,
 } from '../actions';
-import { Direction } from '../state';
+import { Direction, TransferState } from '../state';
 
 /**
  * Re-queue pending transfer's BalanceProof/Envelope messages for retry on init
  *
  * @param action$ - Observable of RaidenActions
  * @param state$ - Observable of RaidenStates
+ * @param deps - Epics dependencies
+ * @param deps.db - Database instance
+ * @param deps.log - Logger instance
  * @returns Observable of transferSigned|transferUnlock.success actions
  */
 export const initQueuePendingEnvelopeMessagesEpic = (
   {}: Observable<RaidenAction>,
-  state$: Observable<RaidenState>,
+  {}: Observable<RaidenState>,
+  { log, db }: RaidenEpicDeps,
 ) =>
-  state$.pipe(
-    first(),
-    mergeMap(function* (state) {
+  defer(() =>
+    db.find({
+      selector: {
+        direction: Direction.SENT,
+        unlockProcessed: { $exists: false },
+        expiredProcessed: { $exists: false },
+        secretRegistered: { $exists: false },
+        channelClosed: { $exists: false },
+      },
+    }),
+  ).pipe(
+    mergeMap(({ docs, warning }) => {
+      if (warning) log.warn(warning, 'initQueuePendingEnvelopeMessagesEpic');
+      return from(docs as TransferStateish[]);
+    }),
+    mergeMap(function* (doc) {
       // loop over all pending transfers
-      for (const [key, sent] of Object.entries(state.sent)) {
-        const secrethash = key as Hash;
-        // transfer already completed or channelClosed
-        if (
-          sent.unlockProcessed ||
-          sent.lockExpiredProcessed ||
-          sent.secret?.registerBlock ||
-          sent.channelClosed
-        )
-          continue;
-        const meta = { secrethash, direction: Direction.SENT };
-        // on init, request monitor presence of any pending transfer target
-        yield matrixPresence.request(undefined, { address: sent.transfer.target });
-        // Processed not received yet for LockedTransfer
-        if (!sent.transferProcessed)
-          yield transferSigned(
-            { message: untime(sent.transfer), fee: sent.fee, partner: sent.partner },
-            meta,
-          );
-        // already unlocked, but Processed not received yet for Unlock
-        if (sent.unlock)
-          yield transferUnlock.success(
-            { message: untime(sent.unlock), partner: sent.partner },
-            meta,
-          );
-        // lock expired, but Processed not received yet for LockExpired
-        if (sent.lockExpired)
-          yield transferExpire.success(
-            { message: untime(sent.lockExpired), partner: sent.partner },
-            meta,
-          );
-      }
+      const transferState = decode(TransferState, doc);
+      const meta = { secrethash: doc.transfer.lock.secrethash, direction: Direction.SENT };
+      // on init, request monitor presence of any pending transfer target
+      yield matrixPresence.request(undefined, { address: transferState.transfer.target });
+      // Processed not received yet for LockedTransfer
+      if (!transferState.transferProcessed)
+        yield transferSigned(
+          {
+            message: untime(transferState.transfer),
+            fee: transferState.fee,
+            partner: transferState.partner,
+          },
+          meta,
+        );
+      // already unlocked, but Processed not received yet for Unlock
+      if (transferState.unlock)
+        yield transferUnlock.success(
+          { message: untime(transferState.unlock), partner: transferState.partner },
+          meta,
+        );
+      // lock expired, but Processed not received yet for LockExpired
+      if (transferState.expired)
+        yield transferExpire.success(
+          { message: untime(transferState.expired), partner: transferState.partner },
+          meta,
+        );
     }),
   );
 
@@ -74,55 +86,66 @@ export const initQueuePendingEnvelopeMessagesEpic = (
  * @param state$ - Observable of RaidenStates
  * @param deps - Epics dependencies
  * @param deps.config$ - Config observable
+ * @param deps.db - Database instance
+ * @param deps.log - Logger instance
  * @returns Observable of transferSigned|transferUnlock.success actions
  */
 export const initQueuePendingReceivedEpic = (
   {}: Observable<RaidenAction>,
-  state$: Observable<RaidenState>,
-  { config$ }: RaidenEpicDeps,
+  {}: Observable<RaidenState>,
+  { log, db, config$ }: RaidenEpicDeps,
 ) =>
-  state$.pipe(
-    first(),
-    mergeMap((state) =>
-      from(Object.entries(state.received) as Array<[Hash, typeof state.received[string]]>),
-    ),
-    filter(
-      ([, received]) =>
-        !received.unlock &&
-        !received.lockExpired &&
-        !received.secret?.registerBlock &&
-        !received.channelClosed,
-    ),
-    mergeMap(([secrethash, received]) => {
+  defer(() =>
+    db.find({
+      selector: {
+        direction: Direction.RECEIVED,
+        unlock: { $exists: false },
+        expired: { $exists: false },
+        secretRegistered: { $exists: false },
+        channelClosed: { $exists: false },
+      },
+    }),
+  ).pipe(
+    mergeMap(({ docs, warning }) => {
+      if (warning) log.warn(warning, 'initQueuePendingReceivedEpic');
+      return from(docs as TransferStateish[]);
+    }),
+    mergeMap((doc) => {
       // loop over all pending transfers
+      const secrethash = doc.transfer.lock.secrethash;
+      const transferState = decode(TransferState, doc);
       const meta = { secrethash, direction: Direction.RECEIVED };
       return merge(
         // on init, request monitor presence of any pending transfer initiator
         of(
           transferSigned(
-            { message: untime(received.transfer), fee: received.fee, partner: received.partner },
+            {
+              message: untime(transferState.transfer),
+              fee: transferState.fee,
+              partner: transferState.partner,
+            },
             meta,
           ),
         ),
         // already revealed to us, but user didn't sign SecretReveal yet
-        received.secret && !received.secretReveal
-          ? of(transferSecret({ secret: received.secret.value }, meta))
+        transferState.secret && !transferState.secretReveal
+          ? of(transferSecret({ secret: transferState.secret }, meta))
           : EMPTY,
         // already revealed to sender, but they didn't Unlock yet
-        received.secretReveal
-          ? of(transferSecretReveal({ message: untime(received.secretReveal) }, meta))
+        transferState.secretReveal
+          ? of(transferSecretReveal({ message: untime(transferState.secretReveal) }, meta))
           : EMPTY,
         // secret not yet known; request *when* receiving is enabled (may be later)
         // secretRequest should always be defined as we sign it when receiving transfer
-        !received.secret && received.secretRequest
+        !transferState.secret && transferState.secretRequest
           ? config$.pipe(
               pluck('caps', Capabilities.NO_RECEIVE),
               filter((noReceive) => !noReceive),
               take(1),
               mergeMapTo(
                 of(
-                  matrixPresence.request(undefined, { address: received.transfer.initiator }),
-                  transferSecretRequest({ message: untime(received.secretRequest) }, meta),
+                  matrixPresence.request(undefined, { address: transferState.transfer.initiator }),
+                  transferSecretRequest({ message: untime(transferState.secretRequest) }, meta),
                 ),
               ),
             )

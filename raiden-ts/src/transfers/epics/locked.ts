@@ -43,7 +43,7 @@ import { RaidenEpicDeps } from '../../types';
 import { isActionOf } from '../../utils/actions';
 import { LruCache } from '../../utils/lru';
 import { pluckDistinct } from '../../utils/rx';
-import { Hash, Signed, UInt, Int, Address } from '../../utils/types';
+import { Hash, Signed, UInt, Int, Address, decode, untime } from '../../utils/types';
 import { RaidenError, ErrorCodes } from '../../utils/error';
 import { Capabilities } from '../../constants';
 import {
@@ -61,8 +61,10 @@ import {
   withdrawExpire,
   withdrawCompleted,
 } from '../actions';
-import { getLocksroot, makeMessageId, getSecrethash } from '../utils';
-import { Direction } from '../state';
+import { getLocksroot, makeMessageId, getSecrethash, transferKey } from '../utils';
+import { Direction, TransferState } from '../state';
+import { TransferStateish } from '../../db/types';
+import { get$ } from '../../db/utils';
 import { matchWithdraw } from './utils';
 
 // calculate locks array for channel end without lock with given secrethash
@@ -99,6 +101,7 @@ function getOpenChannel(
  * @param action - transfer request action to be sent.
  * @param config - Config object
  * @param config.revealTimeout - The reveal timeout for the transfer.
+ * @param config.confirmationBlocks - Confirmations block config
  * @param deps - {@link RaidenEpicDeps}
  * @param deps.log - Logger instance
  * @param deps.address - Our address
@@ -109,15 +112,9 @@ function getOpenChannel(
 function makeAndSignTransfer$(
   state: RaidenState,
   action: transfer.request,
-  { revealTimeout }: RaidenConfig,
+  { revealTimeout, confirmationBlocks }: RaidenConfig,
   { log, address, network, signer }: RaidenEpicDeps,
 ): Observable<transferSecret | transferSigned> {
-  if (action.meta.secrethash in state.sent) {
-    // don't throw to avoid emitting transfer.failure, to just wait for already pending transfer
-    log.warn('transfer already present', action.meta);
-    return EMPTY;
-  }
-
   // assume paths are valid and recipient is first hop of first route
   // compose metadata from it, and use first path fee
   const metadata: Metadata = {
@@ -129,7 +126,9 @@ function makeAndSignTransfer$(
   const tokenNetwork = action.payload.tokenNetwork;
   const channel = getOpenChannel(state, { tokenNetwork, partner });
   assert(
-    !action.payload.expiration || action.payload.expiration >= state.blockNumber + revealTimeout,
+    !action.payload.expiration ||
+      // require mediated transfers to have at least confirmationBlocks before danger zone
+      action.payload.expiration >= state.blockNumber + revealTimeout + confirmationBlocks,
     'expiration too soon',
   );
 
@@ -202,9 +201,20 @@ function sendTransferSigned(
   action: transfer.request,
   deps: RaidenEpicDeps,
 ): Observable<transferSecret | transferSigned | transfer.failure> {
-  return combineLatest([state$, deps.config$]).pipe(
+  return combineLatest([
+    state$,
+    deps.config$,
+    deps.db.get<TransferStateish>(transferKey(action.meta)).catch(() => null),
+  ]).pipe(
     first(),
-    mergeMap(([state, config]) => makeAndSignTransfer$(state, action, config, deps)),
+    mergeMap(([state, config, doc]) => {
+      if (doc) {
+        // don't throw to avoid emitting transfer.failure, to just wait for already pending transfer
+        deps.log.warn('transfer already present', action.meta);
+        return EMPTY;
+      }
+      return makeAndSignTransfer$(state, action, config, deps);
+    }),
     catchError((err) => of(transfer.failure(err, action.meta))),
   );
 }
@@ -215,6 +225,7 @@ function sendTransferSigned(
  * @param state$ - Observable of the latest app state.
  * @param state - Contains The current state of the app
  * @param action - The transfer unlock action that will generate the transferUnlock.success action.
+ * @param doc - TransferStateish from RaidenDatabase
  * @param deps - Epics dependencies
  * @param deps.signer - The signer that will sign the message
  * @param deps.log - Logger instance
@@ -224,28 +235,25 @@ function makeAndSignUnlock$(
   state$: Observable<RaidenState>,
   state: RaidenState,
   action: transferUnlock.request,
+  doc: TransferStateish,
   { log, signer }: { signer: RaidenEpicDeps['signer']; log: RaidenEpicDeps['log'] },
 ): Observable<transferUnlock.success> {
   const secrethash = action.meta.secrethash;
-  assert(secrethash in state.sent, 'unknown transfer');
-  const locked = state.sent[secrethash].transfer;
+  const transferState = decode(TransferState, doc);
+  const locked = transferState.transfer;
   const tokenNetwork = locked.token_network_address;
-  const partner = state.sent[secrethash].partner;
+  const partner = transferState.partner;
   const channel = getOpenChannel(state, { tokenNetwork, partner });
 
   let signed$: Observable<Signed<Unlock>>;
-  if (state.sent[secrethash].unlock) {
+  if (transferState.unlock) {
     // unlock already signed, use cached
-    signed$ = of(state.sent[secrethash].unlock!);
+    signed$ = of(transferState.unlock!);
   } else {
-    assert(state.sent[secrethash].secret, 'unknown secret');
+    assert(transferState.secret, 'unknown secret'); // never fails because we wait before
     // don't forget to check after signature too, may have expired by then
     // allow unlocking past expiration if secret registered on-chain
-    assert(
-      state.sent[secrethash].secret!.registerBlock > 0 ||
-        locked.lock.expiration.gt(state.blockNumber),
-      'lock expired',
-    );
+    assert(doc.secretRegistered || locked.lock.expiration.gt(state.blockNumber), 'lock expired');
 
     const message: Unlock = {
       type: MessageType.UNLOCK,
@@ -260,7 +268,7 @@ function makeAndSignUnlock$(
       locked_amount: channel.own.balanceProof.lockedAmount.sub(locked.lock.amount) as UInt<32>,
       locksroot: getLocksroot(withoutLock(channel.own, secrethash)),
       payment_identifier: locked.payment_identifier,
-      secret: state.sent[action.meta.secrethash].secret!.value,
+      secret: transferState.secret,
     };
     signed$ = from(signMessage(signer, message, { log }));
   }
@@ -268,12 +276,12 @@ function makeAndSignUnlock$(
   return signed$.pipe(
     withLatestFrom(state$),
     map(([signed, state]) => {
+      const channel = getOpenChannel(state, { tokenNetwork, partner });
       assert(
-        state.sent[secrethash].secret!.registerBlock > 0 ||
-          locked.lock.expiration.gt(state.blockNumber),
+        locked.lock.expiration.gt(state.blockNumber) ||
+          channel.own.locks.find((lock) => lock.secrethash === secrethash && lock.registered),
         'lock expired',
       );
-      assert(!state.sent[secrethash].channelClosed, 'channel closed!');
       return transferUnlock.success({ message: signed, partner }, action.meta);
       // messageSend Unlock handled by transferRetryMessageEpic
       // we don't check if transfer was refunded. If partner refunded the transfer but still
@@ -293,16 +301,17 @@ function makeAndSignUnlock$(
  * @param deps - RaidenEpicDeps members
  * @param deps.signer - Signer instance
  * @param deps.log - Logger instance
+ * @param deps.db - Database instance
  * @returns Observable of transferUnlock.success actions
  */
 function sendTransferUnlocked(
   state$: Observable<RaidenState>,
   action: transferUnlock.request,
-  { signer, log }: Pick<RaidenEpicDeps, 'signer' | 'log'>,
+  { signer, log, db }: RaidenEpicDeps,
 ): Observable<transferUnlock.success | transferUnlock.failure> {
-  return state$.pipe(
-    first(),
-    mergeMap((state) => makeAndSignUnlock$(state$, state, action, { log, signer })),
+  return combineLatest([state$, get$<TransferStateish>(db, transferKey(action.meta))]).pipe(
+    first(([, doc]) => !!doc.secret), // wait for the secret to be persisted
+    mergeMap(([state, doc]) => makeAndSignUnlock$(state$, state, action, doc, { log, signer })),
     catchError((err) => {
       log.warn('Error trying to unlock after SecretReveal', err);
       return of(transferUnlock.failure(err, action.meta));
@@ -315,30 +324,32 @@ function sendTransferUnlocked(
  *
  * @param state - Contains The current state of the app
  * @param action - The transfer expire action.
- * @param signer - RaidenEpicDeps members
- * @param signer.signer - Signer instance
- * @param signer.log - Logger instance
+ * @param doc - TransferStateish from RaidenDatabase
+ * @param deps - RaidenEpicDeps members
+ * @param deps.signer - Signer instance
+ * @param deps.log - Logger instance
  * @returns Observable of transferExpire.success actions
  */
 function makeAndSignLockExpired$(
   state: RaidenState,
   action: transferExpire.request,
+  doc: TransferStateish,
   { signer, log }: Pick<RaidenEpicDeps, 'signer' | 'log'>,
 ): Observable<transferExpire.success> {
   const secrethash = action.meta.secrethash;
-  assert(secrethash in state.sent, 'unknown transfer');
-  const locked = state.sent[secrethash].transfer;
+  const transferState = decode(TransferState, doc);
+  const locked = transferState.transfer;
   const tokenNetwork = locked.token_network_address;
-  const partner = state.sent[secrethash].partner;
+  const partner = transferState.partner;
   const channel = getOpenChannel(state, { tokenNetwork, partner });
 
   let signed$: Observable<Signed<LockExpired>>;
-  if (state.sent[secrethash].lockExpired) {
-    // lockExpired already signed, use cached
-    signed$ = of(state.sent[secrethash].lockExpired!);
+  if (transferState.expired) {
+    // expired already signed, use cached
+    signed$ = of(transferState.expired!);
   } else {
     assert(locked.lock.expiration.lt(state.blockNumber), 'lock not yet expired');
-    assert(!state.sent[secrethash].unlock, 'transfer already unlocked');
+    assert(!transferState.unlock, 'transfer already unlocked');
 
     const locksroot = getLocksroot(withoutLock(channel.own, secrethash));
 
@@ -372,19 +383,20 @@ function makeAndSignLockExpired$(
  *
  * @param state$ - Observable of current state
  * @param action - transfer request action to be sent
- * @param signer - RaidenEpicDeps members
- * @param signer.log - Logger instance
- * @param signer.signer - Signer instance
+ * @param deps - RaidenEpicDeps members
+ * @param deps.log - Logger instance
+ * @param deps.signer - Signer instance
+ * @param deps.db - Database instance
  * @returns Observable of transferExpire.success|transferExpire.failure actions
  */
 function sendTransferExpired(
   state$: Observable<RaidenState>,
   action: transferExpire.request,
-  { log, signer }: Pick<RaidenEpicDeps, 'signer' | 'log'>,
+  { log, signer, db }: RaidenEpicDeps,
 ): Observable<transferExpire.success | transferExpire.failure> {
-  return state$.pipe(
+  return combineLatest([state$, get$<TransferStateish>(db, transferKey(action.meta))]).pipe(
     first(),
-    mergeMap((state) => makeAndSignLockExpired$(state, action, { signer, log })),
+    mergeMap(([state, doc]) => makeAndSignLockExpired$(state, action, doc, { signer, log })),
     catchError((err) => of(transferExpire.failure(err, action.meta))),
   );
 }
@@ -392,7 +404,7 @@ function sendTransferExpired(
 function receiveTransferSigned(
   state$: Observable<RaidenState>,
   action: messageReceivedTyped<Signed<LockedTransfer>>,
-  { address, log, signer, config$ }: RaidenEpicDeps,
+  { address, log, signer, config$, db }: RaidenEpicDeps,
 ): Observable<
   | transferSigned
   | transfer.failure
@@ -402,21 +414,25 @@ function receiveTransferSigned(
 > {
   const secrethash = action.payload.message.lock.secrethash;
   const meta = { secrethash, direction: Direction.RECEIVED };
-  return combineLatest([state$, config$]).pipe(
+  return combineLatest([
+    state$,
+    config$,
+    db.get<TransferStateish>(transferKey(meta)).catch(() => null),
+  ]).pipe(
     first(),
-    mergeMap(([state, { revealTimeout, caps }]) => {
+    mergeMap(([state, { revealTimeout, caps }, doc]) => {
       const transfer: Signed<LockedTransfer> = action.payload.message;
-      if (secrethash in state.received) {
+      if (doc) {
         log.warn('transfer already present', action.meta);
         const msgId = transfer.message_identifier;
         // if transfer matches the stored one, re-send Processed once
-        if (
-          state.received[secrethash].partner === action.meta.address &&
-          state.received[secrethash].transfer.message_identifier.eq(msgId)
-        ) {
+        if (doc.partner === action.meta.address && msgId.eq(doc.transfer.message_identifier)) {
           // transferProcessed again will trigger messageSend.request
           return of(
-            transferProcessed({ message: state.received[secrethash].transferProcessed! }, meta),
+            transferProcessed(
+              { message: untime(decode(TransferState, doc).transferProcessed!) },
+              meta,
+            ),
           );
         } else return EMPTY;
       }
@@ -506,33 +522,37 @@ function receiveTransferSigned(
 function receiveTransferUnlocked(
   state$: Observable<RaidenState>,
   action: messageReceivedTyped<Signed<Unlock>>,
-  { log, signer }: RaidenEpicDeps,
+  { log, signer, db }: RaidenEpicDeps,
 ) {
   const secrethash = getSecrethash(action.payload.message.secret);
   const meta = { secrethash, direction: Direction.RECEIVED };
-  return state$.pipe(
+  // db.get will throw if not found, being handled on final catchError
+  return combineLatest([state$, db.get<TransferStateish>(transferKey(meta))]).pipe(
     first(),
-    mergeMap((state) => {
-      if (!(secrethash in state.received)) return EMPTY;
-      const received = state.received[secrethash];
-
+    mergeMap(([state, doc]) => {
       const unlock: Signed<Unlock> = action.payload.message;
       const partner = action.meta.address;
-      assert(partner === received.partner, 'wrong partner');
-      assert(!received.lockExpired, 'already expired');
+      assert(partner === doc.partner, 'wrong partner');
+      // may race on db.get, but will validate on synchronous channel state reducer
+      assert(!doc.expired, 'already expired');
 
-      if (received.unlock) {
+      if (doc.unlock) {
         log.warn('transfer already unlocked', action.meta);
         // if message matches the stored one, re-send Processed once
         if (
-          received.unlockProcessed &&
-          received.unlockProcessed.message_identifier.eq(unlock.message_identifier)
+          doc.unlockProcessed &&
+          unlock.message_identifier.eq(doc.unlockProcessed.message_identifier)
         ) {
           // transferProcessed again will trigger messageSend.request
-          return of(transferUnlockProcessed({ message: received.unlockProcessed }, meta));
+          return of(
+            transferUnlockProcessed(
+              { message: untime(decode(TransferState, doc).unlockProcessed!) },
+              meta,
+            ),
+          );
         } else return EMPTY;
       }
-      const locked = received.transfer;
+      const locked = decode(TransferState, doc).transfer;
       assert(unlock.token_network_address === locked.token_network_address, 'wrong tokenNetwork');
 
       // unlock validation
@@ -578,40 +598,44 @@ function receiveTransferUnlocked(
 function receiveTransferExpired(
   state$: Observable<RaidenState>,
   action: messageReceivedTyped<Signed<LockExpired>>,
-  { log, signer, config$ }: RaidenEpicDeps,
+  { log, signer, config$, db }: RaidenEpicDeps,
 ) {
   const secrethash = action.payload.message.secrethash;
   const meta = { secrethash, direction: Direction.RECEIVED };
-  return combineLatest([state$, config$]).pipe(
+  // db.get will throw if not found, being handled on final catchError
+  return combineLatest([state$, config$, db.get<TransferStateish>(transferKey(meta))]).pipe(
     first(),
-    mergeMap(([state, { confirmationBlocks }]) => {
-      if (!(secrethash in state.received)) return EMPTY;
-      const received = state.received[secrethash];
-
+    mergeMap(([state, { confirmationBlocks }, doc]) => {
       const expired: Signed<LockExpired> = action.payload.message;
       const partner = action.meta.address;
-      assert(partner === received.partner, 'wrong partner');
-      assert(!received.unlock, 'transfer unlocked');
+      assert(partner === doc.partner, 'wrong partner');
+      // may race on db.get, but will validate on synchronous channel state reducer
+      assert(!doc.unlock, 'transfer unlocked');
 
-      if (received.lockExpired) {
+      if (doc.expired) {
         log.warn('transfer already expired', action.meta);
         // if message matches the stored one, re-send Processed once
         if (
-          received.lockExpiredProcessed &&
-          received.lockExpiredProcessed.message_identifier.eq(expired.message_identifier)
+          doc.expiredProcessed &&
+          expired.message_identifier.eq(doc.expiredProcessed.message_identifier)
         ) {
           // transferProcessed again will trigger messageSend.request
-          return of(transferExpireProcessed({ message: received.lockExpiredProcessed }, meta));
+          return of(
+            transferExpireProcessed(
+              { message: untime(decode(TransferState, doc).expiredProcessed!) },
+              meta,
+            ),
+          );
         } else return EMPTY;
       }
-      const locked = received.transfer;
+      const locked = decode(TransferState, doc).transfer;
 
-      // lockExpired validation
+      // expired validation
       assert(
         locked.lock.expiration.add(confirmationBlocks).lte(state.blockNumber),
         'expiration block not confirmed yet',
       );
-      assert(!received.secret?.registerBlock, 'secret registered onchain');
+      assert(!doc.secretRegistered, 'secret registered onchain');
       assert(expired.token_network_address === locked.token_network_address, 'wrong tokenNetwork');
 
       const tokenNetwork = expired.token_network_address;

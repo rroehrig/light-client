@@ -3,12 +3,12 @@ import { EMPTY, Observable } from 'rxjs';
 import { filter, mergeMap, withLatestFrom, switchMap, first } from 'rxjs/operators';
 
 import { RaidenAction } from '../../actions';
-import { RaidenConfig } from '../../config';
 import { messageSend } from '../../messages/actions';
 import { RaidenState } from '../../state';
 import { RaidenEpicDeps } from '../../types';
 import { isActionOf } from '../../utils/actions';
-import { pluckDistinct } from '../../utils/rx';
+import { get$ } from '../../db/utils';
+import { TransferStateish } from '../../db/types';
 import {
   transferExpire,
   transferSigned,
@@ -17,6 +17,7 @@ import {
   transferSecretReveal,
 } from '../actions';
 import { Direction } from '../state';
+import { transferKey } from '../utils';
 import { retrySendUntil$, exponentialBackoff } from './utils';
 
 /**
@@ -26,36 +27,34 @@ import { retrySendUntil$, exponentialBackoff } from './utils';
  * to start retrying sending the message again until stop condition is met.
  *
  * @param action$ - Observable of transferSigned actions
- * @param state$ - Observable of latest RaidenStates
- * @param config$ - Observable of latest RaidenConfig
  * @param action - The {@link transferSigned} action
+ * @param deps - Epics dependencies subset
+ * @param deps.config$ - Observable of latest RaidenConfig
+ * @param deps.db - Database instance
  * @returns - Observable of {@link messageSend.request} actions
  */
 const signedRetryMessage$ = (
   action$: Observable<RaidenAction>,
-  state$: Observable<RaidenState>,
-  config$: Observable<RaidenConfig>,
   action: transferSigned,
+  { db, config$ }: Pick<RaidenEpicDeps, 'db' | 'config$'>,
 ): Observable<messageSend.request> => {
   if (action.meta.direction !== Direction.SENT) return EMPTY;
   return config$.pipe(
     first(),
     switchMap(({ pollingInterval, httpTimeout }) => {
-      const secrethash = action.meta.secrethash;
       const signed = action.payload.message;
       const send = messageSend.request(
         { message: signed },
         { address: signed.recipient, msgId: signed.message_identifier.toString() },
       );
-      const notifier = state$.pipe(
-        pluckDistinct('sent', secrethash),
+      const notifier = get$<TransferStateish>(db, transferKey(action.meta)).pipe(
         filter(
-          (sent) =>
+          (doc) =>
             !!(
-              sent.transferProcessed ||
-              sent.unlockProcessed ||
-              sent.lockExpiredProcessed ||
-              sent.channelClosed
+              doc.transferProcessed ||
+              doc.unlockProcessed ||
+              doc.expiredProcessed ||
+              doc.channelClosed
             ),
         ),
       );
@@ -76,34 +75,29 @@ const signedRetryMessage$ = (
  * start retrying sending the message again until stop condition is met.
  *
  * @param action$ - Observable of transferUnlock.success actions
- * @param state$ - Observable of the latest RaidenStates
- * @param config$ - Observable of latest RaidenConfig
  * @param action - the transferUnlock.success action
+ * @param deps - Epics dependencies subset
+ * @param deps.config$ - Observable of latest RaidenConfig
+ * @param deps.db - Database instance
  * @returns Observable of {@link messageSend.request} actions
  */
 const unlockedRetryMessage$ = (
   action$: Observable<RaidenAction>,
-  state$: Observable<RaidenState>,
-  config$: Observable<RaidenConfig>,
   action: transferUnlock.success,
+  { db, config$ }: Pick<RaidenEpicDeps, 'db' | 'config$'>,
 ): Observable<messageSend.request> => {
   if (action.meta.direction !== Direction.SENT) return EMPTY;
-  return state$.pipe(
+  const doc$ = get$<TransferStateish>(db, transferKey(action.meta));
+  return doc$.pipe(
     first(),
     withLatestFrom(config$),
-    switchMap(([state, { pollingInterval, httpTimeout }]) => {
-      const secrethash = action.meta.secrethash;
+    switchMap(([doc, { pollingInterval, httpTimeout }]) => {
       const unlock = action.payload.message;
-      const locked = state.sent[secrethash].transfer;
       const send = messageSend.request(
         { message: unlock },
-        { address: locked.recipient, msgId: unlock.message_identifier.toString() },
+        { address: doc.partner, msgId: unlock.message_identifier.toString() },
       );
-
-      const notifier = state$.pipe(
-        pluckDistinct('sent', secrethash),
-        filter((sent) => !!(sent.unlockProcessed || sent.channelClosed)),
-      );
+      const notifier = doc$.pipe(filter((doc) => !!(doc.unlockProcessed || doc.channelClosed)));
       // emit request once immediatelly, then wait until respective success,
       // then repeats until confirmed
       return retrySendUntil$(
@@ -123,35 +117,32 @@ const unlockedRetryMessage$ = (
  * start retrying sending the message again until stop condition is met.
  *
  * @param action$ - Observable of transferUnlock.success actions
- * @param state$ - Observable of latest RaidenState
- * @param config$ - Observable of latest RaidenConfig
  * @param action - transferExpire.success action
+ * @param deps - Epics dependencies subset
+ * @param deps.config$ - Observable of latest RaidenConfig
+ * @param deps.db - Database instance
  * @returns Observable of {@link messageSend.request} actions
  */
 const expiredRetryMessages$ = (
   action$: Observable<RaidenAction>,
-  state$: Observable<RaidenState>,
-  config$: Observable<RaidenConfig>,
   action: transferExpire.success,
+  { db, config$ }: Pick<RaidenEpicDeps, 'db' | 'config$'>,
 ): Observable<messageSend.request> => {
   if (action.meta.direction !== Direction.SENT) return EMPTY;
-  return state$.pipe(
+  const doc$ = get$<TransferStateish>(db, transferKey(action.meta));
+  return doc$.pipe(
     first(),
     withLatestFrom(config$),
-    switchMap(([state, { pollingInterval, httpTimeout }]) => {
-      const secrethash = action.meta.secrethash;
-      const lockExpired = action.payload.message;
+    switchMap(([doc, { pollingInterval, httpTimeout }]) => {
+      const expired = action.payload.message;
       const send = messageSend.request(
-        { message: lockExpired },
+        { message: expired },
         {
-          address: state.sent[secrethash].transfer.recipient,
-          msgId: lockExpired.message_identifier.toString(),
+          address: doc.partner,
+          msgId: expired.message_identifier.toString(),
         },
       );
-      const notifier = state$.pipe(
-        pluckDistinct('sent', secrethash),
-        filter((sent) => !!(sent.lockExpiredProcessed || sent.channelClosed)),
-      );
+      const notifier = doc$.pipe(filter((doc) => !!(doc.expiredProcessed || doc.channelClosed)));
       // emit request once immediatelly, then wait until respective success,
       // then retries until confirmed
       return retrySendUntil$(
@@ -166,33 +157,28 @@ const expiredRetryMessages$ = (
 
 const secretRequestRetryMessage$ = (
   action$: Observable<RaidenAction>,
-  state$: Observable<RaidenState>,
-  config$: Observable<RaidenConfig>,
   action: transferSecretRequest,
+  { db, config$ }: Pick<RaidenEpicDeps, 'db' | 'config$'>,
 ): Observable<messageSend.request> => {
   if (action.meta.direction !== Direction.RECEIVED) return EMPTY;
-  return state$.pipe(
+  const doc$ = get$<TransferStateish>(db, transferKey(action.meta));
+  return doc$.pipe(
     first(),
     withLatestFrom(config$),
-    switchMap(([state, { pollingInterval, httpTimeout }]) => {
-      const secrethash = action.meta.secrethash;
+    switchMap(([doc, { pollingInterval, httpTimeout }]) => {
       const request = action.payload.message;
       const send = messageSend.request(
         { message: request },
         {
-          address: state.received[secrethash].transfer.initiator,
+          address: doc.transfer.initiator,
           msgId: request.message_identifier.toString(),
         },
       );
-      const notifier = state$.pipe(
-        pluckDistinct('received', secrethash),
-        // stop retrying when we've signed secretReveal, lock expired or channel closed
-        // we could stop as soon as we know received.secret, but we use it to retry SecretReveal
-        // signature, if it failed for any reason
-        filter(
-          (received) =>
-            !!(received.secretReveal || received.lockExpired || received.channelClosed),
-        ),
+      // stop retrying when we've signed secretReveal, lock expired or channel closed;
+      // we could stop as soon as we know received.secret, but we use it to retry SecretReveal
+      // signature, if it failed for any reason
+      const notifier = doc$.pipe(
+        filter((doc) => !!(doc.secretReveal || doc.expired || doc.channelClosed)),
       );
       // emit request once immediatelly, then wait until respective success,
       // then retries until confirmed
@@ -208,32 +194,27 @@ const secretRequestRetryMessage$ = (
 
 const secretRevealRetryMessage$ = (
   action$: Observable<RaidenAction>,
-  state$: Observable<RaidenState>,
-  config$: Observable<RaidenConfig>,
   action: transferSecretReveal,
+  { db, config$ }: Pick<RaidenEpicDeps, 'db' | 'config$'>,
 ): Observable<messageSend.request> => {
   if (action.meta.direction !== Direction.RECEIVED) return EMPTY;
-  return state$.pipe(
+  const doc$ = get$<TransferStateish>(db, transferKey(action.meta));
+  return doc$.pipe(
     first(),
     withLatestFrom(config$),
-    switchMap(([state, { pollingInterval, httpTimeout }]) => {
-      const secrethash = action.meta.secrethash;
+    switchMap(([doc, { pollingInterval, httpTimeout }]) => {
       const reveal = action.payload.message;
       const send = messageSend.request(
         { message: reveal },
         {
-          address: state.received[secrethash].partner,
+          address: doc.partner,
           msgId: reveal.message_identifier.toString(),
         },
       );
-      const notifier = state$.pipe(
-        pluckDistinct('received', secrethash),
-        // stop retrying when we were unlocked, secret registered or channel closed
-        // we don't test for lockExpired, as we know the secret and must not accept LockExpired
-        filter(
-          (received) =>
-            !!(received.unlock || received.secret?.registerBlock || received.channelClosed),
-        ),
+      // stop retrying when we were unlocked, secret registered or channel closed
+      // we don't test for expired, as we know the secret and must not accept LockExpired
+      const notifier = doc$.pipe(
+        filter((doc) => !!(doc.unlock || doc.secretRegistered || doc.channelClosed)),
       );
       // emit request once immediatelly, then wait until respective success,
       // then retries until confirmed
@@ -260,9 +241,8 @@ const secretRevealRetryMessage$ = (
 export const transferRetryMessageEpic = (
   action$: Observable<RaidenAction>,
   {}: Observable<RaidenState>,
-  { latest$, config$ }: RaidenEpicDeps,
+  deps: RaidenEpicDeps,
 ): Observable<messageSend.request> => {
-  const state$ = latest$.pipe(pluckDistinct('state'));
   return action$.pipe(
     filter(
       isActionOf([
@@ -275,14 +255,14 @@ export const transferRetryMessageEpic = (
     ),
     mergeMap((action) =>
       transferSigned.is(action)
-        ? signedRetryMessage$(action$, state$, config$, action)
+        ? signedRetryMessage$(action$, action, deps)
         : transferUnlock.success.is(action)
-        ? unlockedRetryMessage$(action$, state$, config$, action)
+        ? unlockedRetryMessage$(action$, action, deps)
         : transferExpire.success.is(action)
-        ? expiredRetryMessages$(action$, state$, config$, action)
+        ? expiredRetryMessages$(action$, action, deps)
         : transferSecretRequest.is(action)
-        ? secretRequestRetryMessage$(action$, state$, config$, action)
-        : secretRevealRetryMessage$(action$, state$, config$, action),
+        ? secretRequestRetryMessage$(action$, action, deps)
+        : secretRevealRetryMessage$(action$, action, deps),
     ),
   );
 };
