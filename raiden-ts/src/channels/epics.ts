@@ -48,7 +48,7 @@ import { ShutdownReason } from '../constants';
 import { chooseOnchainAccount, getContractWithSigner } from '../helpers';
 import { Address, Hash, UInt, Signature, isntNil, HexString, last } from '../utils/types';
 import { isActionOf } from '../utils/actions';
-import { pluckDistinct, distinctRecordValues, retryAsync$ } from '../utils/rx';
+import { pluckDistinct, distinctRecordValues, retryAsync$, takeIf } from '../utils/rx';
 import { fromEthersEvent, getNetwork, logToContractEvent } from '../utils/ethers';
 import { encode } from '../utils/data';
 import { RaidenError, ErrorCodes, assert } from '../utils/error';
@@ -1104,20 +1104,7 @@ export const channelAutoSettleEpic = (
         ),
       ),
     ),
-    // complete when autoSettle becomes false
-    takeUntil(
-      config$.pipe(
-        pluck('autoSettle'),
-        filter((autoSettle) => !autoSettle),
-      ),
-    ),
-    // re-subscribe when autoSettle becomes true
-    repeatWhen(() =>
-      config$.pipe(
-        pluck('autoSettle'),
-        filter((autoSettle) => autoSettle),
-      ),
-    ),
+    takeIf(config$.pipe(pluck('autoSettle'))),
   );
 
 /**
