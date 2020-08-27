@@ -1193,7 +1193,7 @@ export const channelSettleEpic = (
             partnerBP$ = findBalanceProofMatchingBalanceHash$(
               db,
               channel,
-              Direction.SENT,
+              Direction.RECEIVED,
               partnerBH as Hash,
             ).pipe(
               catchError(() =>
@@ -1217,13 +1217,13 @@ export const channelSettleEpic = (
                   .lt(ownBP.transferredAmount.add(ownBP.lockedAmount))
               )
                 return [
-                  [address, ownBP],
                   [partner, partnerBP],
+                  [address, ownBP],
                 ] as const;
               else
                 return [
-                  [partner, partnerBP],
                   [address, ownBP],
+                  [partner, partnerBP],
                 ] as const;
             }),
             mergeMap(([part1, part2]) =>

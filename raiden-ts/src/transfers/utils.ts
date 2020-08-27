@@ -1,7 +1,7 @@
 import { concat, hexlify } from 'ethers/utils/bytes';
 import { keccak256, randomBytes, bigNumberify, sha256 } from 'ethers/utils';
 import { HashZero } from 'ethers/constants';
-import { first, mergeMap, map, filter, pluck } from 'rxjs/operators';
+import { first, mergeMap, map, filter } from 'rxjs/operators';
 import { of, from, defer } from 'rxjs';
 
 import { channelUniqueKey } from '../channels/utils';
@@ -11,8 +11,7 @@ import { encode } from '../utils/data';
 import { Lock, BalanceProofZero } from '../channels/types';
 import { Channel } from '../channels';
 import { getBalanceProofFromEnvelopeMessage, createBalanceHash } from '../messages';
-import { RaidenDatabase } from '../db/types';
-import { byPrefix } from '../db/utils';
+import { RaidenDatabase, TransferStateish } from '../db/types';
 import { TransferState, RaidenTransfer, RaidenTransferStatus, Direction } from './state';
 
 /**
@@ -185,14 +184,10 @@ export function findBalanceProofMatchingBalanceHash$(
   balanceHash: Hash,
 ) {
   if (balanceHash === HashZero) return of(BalanceProofZero);
-  // TODO: replace allDocs with proper indexes for channel & partner
   return defer(() =>
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    db.allDocs<any>({ include_docs: true, ...byPrefix(`${direction}:`, true) }),
+    db.find({ selector: { channel: channelUniqueKey(channel), direction } }),
   ).pipe(
-    mergeMap((result) => from(result.rows)),
-    pluck('doc'),
-    filter((doc): doc is TransferState => doc && doc.channel === channelUniqueKey(channel)),
+    mergeMap(({ docs }) => from(docs as TransferStateish[])),
     mergeMap((doc) => {
       const transferState = decode(TransferState, doc);
       return from([transferState.transfer, transferState.unlock, transferState.expired]);
