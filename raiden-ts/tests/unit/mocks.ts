@@ -5,6 +5,7 @@ patchEthersDefineReadOnly();
 patchEthersGetNetwork();
 
 import { AsyncSubject, of, BehaviorSubject, ReplaySubject } from 'rxjs';
+import { filter, take } from 'rxjs/operators';
 import { MatrixClient } from 'matrix-js-sdk';
 import { EventEmitter } from 'events';
 import { memoize } from 'lodash';
@@ -28,6 +29,16 @@ import {
 } from 'ethers/utils';
 import { Contract, EventFilter, ContractTransaction } from 'ethers/contract';
 import { Wallet } from 'ethers/wallet';
+import PouchDB from 'pouchdb';
+import Loki from 'lokijs';
+
+jest.mock('raiden-ts/messages/utils', () => ({
+  ...jest.requireActual<any>('raiden-ts/messages/utils'),
+  signMessage: jest.fn(jest.requireActual<any>('raiden-ts/messages/utils').signMessage),
+}));
+import { signMessage } from 'raiden-ts/messages/utils';
+export const originalSignMessage = jest.requireActual<any>('raiden-ts/messages/utils').signMessage;
+export const mockedSignMessage = signMessage as jest.MockedFunction<typeof signMessage>;
 
 import { TokenNetworkRegistry } from 'raiden-ts/contracts/TokenNetworkRegistry';
 import { TokenNetwork } from 'raiden-ts/contracts/TokenNetwork';
@@ -48,19 +59,29 @@ import { MonitoringService } from 'raiden-ts/contracts/MonitoringService';
 import { RaidenEpicDeps, ContractsInfo, Latest } from 'raiden-ts/types';
 import { makeInitialState, RaidenState } from 'raiden-ts/state';
 import { assert } from 'raiden-ts/utils';
-import { Address, Signature, UInt, Hash } from 'raiden-ts/utils/types';
+import { Address, Signature, UInt, Hash, decode, Secret } from 'raiden-ts/utils/types';
 import { getServerName } from 'raiden-ts/utils/matrix';
 import { pluckDistinct } from 'raiden-ts/utils/rx';
 import { raidenConfigUpdate, RaidenAction, raidenShutdown } from 'raiden-ts/actions';
 import { makeDefaultConfig, RaidenConfig } from 'raiden-ts/config';
-import { makeSecret } from 'raiden-ts/transfers/utils';
+import { getSecrethash, makeSecret } from 'raiden-ts/transfers/utils';
 import { raidenReducer } from 'raiden-ts/reducer';
-import { ShutdownReason } from 'raiden-ts/constants';
+import { ShutdownReason, Capabilities } from 'raiden-ts/constants';
 import { createEpicMiddleware } from 'redux-observable';
 import { raidenRootEpic } from 'raiden-ts/epics';
-import { filter, take } from 'rxjs/operators';
+import { migrateDatabase, putRaidenState, getRaidenState } from 'raiden-ts/db/utils';
+import { RaidenStorageConstructor, StateMember } from 'raiden-ts/db/types';
+import { getNetworkName } from 'raiden-ts/utils/ethers';
+import { createPersisterMiddleware } from 'raiden-ts/persister';
+import { LokiRaidenAdapter } from 'raiden-ts/db/adapter';
+import { Channel } from 'raiden-ts/channels/state';
+import { TransferState } from 'raiden-ts/transfers/state';
 
 logging.setLevel(logging.levels.DEBUG);
+const RaidenPouchDB = PouchDB.defaults({
+  adapter: 'memory',
+  log: logging,
+} as any) as RaidenStorageConstructor;
 
 export type MockedTransaction = ContractTransaction & {
   wait: jest.MockedFunction<ContractTransaction['wait']>;
@@ -86,6 +107,15 @@ export interface MockRaidenEpicDeps extends RaidenEpicDeps {
   serviceRegistryContract: MockedContract<ServiceRegistry>;
   userDepositContract: MockedContract<UserDeposit>;
   secretRegistryContract: MockedContract<SecretRegistry>;
+}
+
+/**
+ * Flush promises
+ *
+ * @returns Promise to be resolved after all pending ones were finished
+ */
+export async function flushPromises() {
+  return new Promise(setImmediate);
 }
 
 /**
@@ -277,9 +307,11 @@ export function mockRTC() {
 // array of cleanup functions registered on current test
 const mockedCleanups: (() => void)[] = [];
 
-afterEach(() => {
+afterEach(async () => {
   let clean;
   while ((clean = mockedCleanups.pop())) clean();
+  await sleep(pollingInterval);
+  await flushPromises();
 });
 
 // spyOn .on, .removeListener & .emit methods and replace with a synchronous simplified logic
@@ -541,6 +573,31 @@ export function raidenEpicDeps(): MockRaidenEpicDeps {
     }),
     config$ = latest$.pipe(pluckDistinct('config'));
 
+  const dbName = [
+    'raiden',
+    getNetworkName(network),
+    contractsInfo.TokenNetworkRegistry.address,
+    address,
+  ].join('_');
+  const storage = new RaidenPouchDB(dbName);
+  const db = new Loki(storage.name, {
+    adapter: new LokiRaidenAdapter(storage),
+  });
+  const dbState = db.getCollection<StateMember>('state');
+  const dbChannels = db.getCollection<Channel>('channels');
+  const dbTransfers = db.getCollection<TransferState>('transfers');
+  db.collections.forEach((coll) => {
+    let dirty = false;
+    Object.defineProperty(coll, 'dirty', {
+      get: () => dirty,
+      set: (v: boolean) => {
+        dirty = v;
+        if (v) db.saveDatabase();
+      },
+    });
+  });
+  const storageKeys = new Set<string>();
+
   return {
     latest$,
     config$,
@@ -559,6 +616,7 @@ export function raidenEpicDeps(): MockRaidenEpicDeps {
     userDepositContract,
     secretRegistryContract,
     monitoringServiceContract,
+    db: { storage, db, state: dbState, channels: dbChannels, transfers: dbTransfers, storageKeys },
   };
 }
 
@@ -575,9 +633,15 @@ function mockedMatrixCreateClient({ baseUrl }: { baseUrl: string }): jest.Mocked
   const server = getServerName(baseUrl)!;
   let userId: string;
   let address: string;
+  let stopped: typeof mockedMatrixUsers[string] | undefined;
   return (Object.assign(new EventEmitter(), {
-    startClient: jest.fn(async () => (mockedMatrixUsers[userId].presence = 'online')),
+    startClient: jest.fn(async () => {
+      if (!(userId in mockedMatrixUsers) && stopped) mockedMatrixUsers[userId] = stopped;
+      stopped = undefined;
+      mockedMatrixUsers[userId].presence = 'online';
+    }),
     stopClient: jest.fn(() => {
+      stopped = mockedMatrixUsers[userId];
       delete mockedMatrixUsers[userId];
     }),
     joinRoom: jest.fn(async (alias) => ({
@@ -605,7 +669,7 @@ function mockedMatrixCreateClient({ baseUrl }: { baseUrl: string }): jest.Mocked
     searchUserDirectory: jest.fn(async ({ term }) => ({
       results: Object.values(mockedMatrixUsers)
         .filter((u) => u.userId.includes(term))
-        .map((u) => ({ user_id: u.userId, display_name: u.displayName })),
+        .map((u) => ({ user_id: u.userId, display_name: u.displayName, avatar_url: u.avatarUrl })),
     })),
     getUserId: jest.fn(() => userId),
     getUsers: jest.fn(() => Object.values(mockedMatrixUsers)),
@@ -625,20 +689,35 @@ function mockedMatrixCreateClient({ baseUrl }: { baseUrl: string }): jest.Mocked
     setAvatarUrl: jest.fn(async (avatarUrl) => {
       assert(userId in mockedMatrixUsers);
       mockedMatrixUsers[userId].avatarUrl = avatarUrl;
+      for (const client of mockedClients) {
+        if (client.address === address) continue;
+        const matrix = await client.deps.matrix$.toPromise();
+        matrix.emit('event', { getType: () => 'm.presence', getSender: () => userId });
+      }
     }),
     setPresence: jest.fn(async ({ presence }: { presence: string }) => {
       assert(userId in mockedMatrixUsers);
       mockedMatrixUsers[userId].presence = presence;
     }),
-    createRoom: jest.fn(async ({ visibility, invite }) => ({
-      room_id: `!roomId_${visibility || 'public'}_with_${(invite || []).join('_')}:${server}`,
-      getMember: jest.fn(),
-      getCanonicalAlias: jest.fn(() => null),
-      getAliases: jest.fn(() => []),
-    })),
+    createRoom: jest.fn(async ({ invite }) => {
+      let pair = [address, '0x'];
+      try {
+        const peerAddr = getAddress((invite[0] as string).substr(1, 42));
+        pair =
+          address.toLowerCase() < peerAddr.toLowerCase()
+            ? [address, peerAddr]
+            : [peerAddr, address];
+      } catch (e) {}
+      return {
+        room_id: `!roomId_${pair[0]}_${pair[1]}:${server}`,
+        getMember: jest.fn(),
+        getCanonicalAlias: jest.fn(() => null),
+        getAliases: jest.fn(() => []),
+      };
+    }),
     getRoom: jest.fn((roomId) => ({
       roomId,
-      getMember: jest.fn(),
+      getMember: jest.fn(() => ({ membership: 'join', roomId })),
       getCanonicalAlias: jest.fn(() => null),
       getAliases: jest.fn(() => []),
     })),
@@ -646,7 +725,29 @@ function mockedMatrixCreateClient({ baseUrl }: { baseUrl: string }): jest.Mocked
     getHomeserverUrl: jest.fn(() => server),
     invite: jest.fn(async () => true),
     leave: jest.fn(async () => true),
-    sendEvent: jest.fn(async () => true),
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    sendEvent: jest.fn(async (roomId: string, type: string, content: any) => {
+      const match = roomId.match(/0x[0-9a-f]{40}/gi);
+      assert(address, 'matrix.sendEvent but client not started');
+      if (!match || stopped) return true;
+      const [p1, p2] = match;
+      const partner = p1 === address ? p2 : p1;
+      for (const client of mockedClients) {
+        if (client.address !== partner) continue;
+        const matrix = await client.deps.matrix$.toPromise();
+        matrix.emit(
+          'Room.timeline',
+          {
+            getType: () => type,
+            getSender: () => userId,
+            event: { content },
+          },
+          matrix.getRoom(roomId),
+        );
+      }
+      logging.info('__sendEvent', address, roomId, type, content);
+      return true;
+    }),
     _http: {
       opts: {},
       // mock request done by raiden/utils::getUserPresence
@@ -691,6 +792,8 @@ const serviceRegistryAddress = makeAddress();
 const svtAddress = makeAddress();
 const oneToNAddress = makeAddress();
 const udcAddress = makeAddress();
+const monitoringServiceAddress = makeAddress();
+const secretRegistryAddress = makeAddress();
 const pollingInterval = 10;
 
 /**
@@ -899,9 +1002,10 @@ export async function makeRaiden(
     1: Zero,
   });
 
-  const secretRegistryContract = SecretRegistryFactory.connect(address, signer) as MockedContract<
-    SecretRegistry
-  >;
+  const secretRegistryContract = SecretRegistryFactory.connect(
+    secretRegistryAddress,
+    signer,
+  ) as MockedContract<SecretRegistry>;
 
   for (const func in secretRegistryContract.functions) {
     jest
@@ -912,9 +1016,23 @@ export async function makeRaiden(
         );
       });
   }
+  secretRegistryContract.functions.registerSecret.mockImplementation(async (secret_) => {
+    const secret = decode(Secret, secret_);
+    const transactionHash = makeHash();
+    providersEmit(
+      {},
+      makeLog({
+        blockNumber: mockedClients[0].deps.provider.blockNumber + 1,
+        transactionHash,
+        filter: secretRegistryContract.filters.SecretRevealed(getSecrethash(secret), null),
+        data: secret,
+      }),
+    );
+    return makeTransaction(undefined, { from: address, hash: transactionHash, data: secret });
+  });
 
   const monitoringServiceContract = MonitoringServiceFactory.connect(
-    address,
+    monitoringServiceAddress,
     signer,
   ) as MockedContract<MonitoringService>;
 
@@ -968,10 +1086,31 @@ export async function makeRaiden(
       confirmationBlocks: 5,
       logger: 'debug',
       pollingInterval,
+      caps: { [Capabilities.NO_DELIVERY]: true, [Capabilities.WEBRTC]: false },
     },
   );
   const latest$ = new ReplaySubject<Latest>(1);
   const config$ = latest$.pipe(pluckDistinct('config'));
+
+  const dbName = [
+    'raiden',
+    getNetworkName(network),
+    contractsInfo.TokenNetworkRegistry.address,
+    address,
+  ].join('_');
+  const db = await migrateDatabase.call(RaidenPouchDB, dbName);
+
+  if (!initialState)
+    try {
+      initialState = decode(RaidenState, getRaidenState(db));
+    } catch (e) {}
+  if (!initialState) {
+    initialState = makeInitialState(
+      { network, address, contractsInfo },
+      { blockNumber: provider.blockNumber },
+    );
+    putRaidenState(db, initialState);
+  }
 
   const deps = {
     latest$,
@@ -991,13 +1130,8 @@ export async function makeRaiden(
     userDepositContract,
     secretRegistryContract,
     monitoringServiceContract,
+    db,
   };
-
-  if (!initialState)
-    initialState = makeInitialState(
-      { network, address, contractsInfo },
-      { blockNumber: provider.blockNumber },
-    );
 
   const epicMiddleware = createEpicMiddleware<
     RaidenAction,
@@ -1006,17 +1140,24 @@ export async function makeRaiden(
     RaidenEpicDeps
   >({ dependencies: deps });
   const output: RaidenAction[] = [];
+  let lastTime = Date.now();
   const store = createStore(
     raidenReducer,
     initialState as any,
-    applyMiddleware(epicMiddleware, () => (next) => (action) => {
-      // don't output before starting, so we can change state without side-effects
-      if (raiden.started) {
-        output.push(action);
-        log.debug(`[${address}] action$:`, action);
-      }
-      return next(action);
-    }),
+    applyMiddleware(
+      epicMiddleware,
+      () => (next) => (action) => {
+        // don't output before starting, so we can change state without side-effects
+        if (raiden.started) {
+          output.push(action);
+          const now = Date.now();
+          log.debug(`[${address}] action$ (+${now - lastTime}ms):`, action);
+          lastTime = now;
+        }
+        return next(action);
+      },
+      createPersisterMiddleware(db),
+    ),
   );
 
   const raiden: MockedRaiden = {
@@ -1028,11 +1169,10 @@ export async function makeRaiden(
     start: async () => {
       if (raiden.started !== undefined) return;
       raiden.started = true;
-      raiden.deps.config$.subscribe(
-        (config) => (raiden.config = config),
-        undefined,
-        () => (raiden.started = false),
-      );
+      raiden.deps.config$.subscribe({
+        next: (config) => (raiden.config = config),
+        complete: () => (raiden.started = false),
+      });
       epicMiddleware.run(raidenRootEpic);
       await raiden.deps.latest$
         .pipe(
@@ -1060,8 +1200,6 @@ export async function makeRaiden(
   return raiden;
 }
 
-const cachedWallets = Array.from({ length: 3 }, makeWallet);
-
 /**
  * Create multiple mocked clients
  *
@@ -1070,7 +1208,7 @@ const cachedWallets = Array.from({ length: 3 }, makeWallet);
  * @returns Array of mocked clients
  */
 export async function makeRaidens(length: number, start = true): Promise<MockedRaiden[]> {
-  return Promise.all(Array.from({ length }, (_, i) => makeRaiden(cachedWallets[i], start)));
+  return Promise.all(Array.from({ length }, () => makeRaiden(undefined, start)));
 }
 
 /**

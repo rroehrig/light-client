@@ -12,19 +12,20 @@ import {
 } from './mocks';
 
 import { Subject } from 'rxjs';
-import { first, scan, pluck } from 'rxjs/operators';
+import { first, scan } from 'rxjs/operators';
 import { Wallet } from 'ethers';
 import { AddressZero, Zero, HashZero } from 'ethers/constants';
 import { bigNumberify, defaultAbiCoder } from 'ethers/utils';
 import { Filter } from 'ethers/providers';
 
-import { Address, Hash, Int, UInt, untime } from 'raiden-ts/utils/types';
+import { Address, Hash, Int, UInt, decode, Secret } from 'raiden-ts/utils/types';
 import { Processed, MessageType } from 'raiden-ts/messages/types';
 import {
   makeMessageId,
   makePaymentId,
   makeSecret,
   getSecrethash,
+  transferKey,
 } from 'raiden-ts/transfers/utils';
 import { IOU } from 'raiden-ts/services/types';
 import { RaidenState } from 'raiden-ts/state';
@@ -36,10 +37,10 @@ import { channelKey } from 'raiden-ts/channels/utils';
 import { tokenMonitored } from 'raiden-ts/channels/actions';
 import { ChannelState, Channel } from 'raiden-ts/channels';
 import { Direction, TransferState } from 'raiden-ts/transfers/state';
-import { transfer, transferUnlock } from 'raiden-ts/transfers/actions';
-import { messageReceived } from 'raiden-ts/messages/actions';
+import { transfer, transferSecret, transferUnlock } from 'raiden-ts/transfers/actions';
 import { TokenNetwork } from 'raiden-ts/contracts/TokenNetwork';
 import { assert } from 'raiden-ts/utils';
+import { get$ } from 'raiden-ts/db/utils';
 
 /**
  * Composes several constants used across epics
@@ -181,6 +182,27 @@ export function getChannel(
 }
 
 /**
+ * @param raiden - Raiden client to fetch transfer state from
+ * @param key - { direction, secrethash } or transferKey
+ * @param wait - Whether to wait for the transfer to be in state, or throw if it isn't
+ * @returns Promise to TransferState
+ */
+export async function getTransfer(
+  raiden: MockedRaiden,
+  key: { direction: Direction; secrethash: Hash } | string,
+  wait: boolean | ((doc: TransferState) => boolean) = false,
+): Promise<TransferState> {
+  if (typeof key !== 'string') key = transferKey(key);
+  let doc;
+  if (wait)
+    doc = await get$(raiden.deps.db.transfers, key)
+      .pipe(wait !== true ? first(wait) : first())
+      .toPromise();
+  else doc = raiden.deps.db.transfers.by('_id', key);
+  return decode(TransferState, doc);
+}
+
+/**
  * Returns the filter used to monitor for channel events
  *
  * @param tokenNetworkContract - TokenNetwork contract
@@ -312,8 +334,13 @@ export async function ensureChannelIsClosed([raiden, partner]: [
   );
   await waitBlock(closeBlock);
   await waitBlock(closeBlock + confirmationBlocks + 1); // confirmation
-  assert(closedStates.includes(getChannel(raiden, partner)?.state), 'Raiden channel not closed');
-  assert(closedStates.includes(getChannel(partner, raiden)?.state), 'Partner channel not closed');
+  if (raiden.started)
+    assert(closedStates.includes(getChannel(raiden, partner)?.state), 'Raiden channel not closed');
+  if (partner.started)
+    assert(
+      closedStates.includes(getChannel(partner, raiden)?.state),
+      'Partner channel not closed',
+    );
 }
 
 /**
@@ -344,8 +371,8 @@ export async function ensureChannelIsSettled([raiden, partner]: [
   );
   await waitBlock(settleBlock);
   await waitBlock(settleBlock + confirmationBlocks + 1); // confirmation
-  assert(!getChannel(raiden, partner), 'Raiden channel not settled');
-  assert(!getChannel(partner, raiden), 'Partner channel not settled');
+  if (raiden.started) assert(!getChannel(raiden, partner), 'Raiden channel not settled');
+  if (partner.started) assert(!getChannel(partner, raiden), 'Partner channel not settled');
 }
 
 /**
@@ -355,23 +382,29 @@ export async function ensureChannelIsSettled([raiden, partner]: [
  * @param clients.0 - Transfer sender node
  * @param clients.1 - Transfer receiver node
  * @param value - Amount to transfer
+ * @param opts - Transfer options
+ * @param opts.secrethash - Secrethash to use
  * @returns Promise to sent TransferState
  */
 export async function ensureTransferPending(
   [raiden, partner]: [MockedRaiden, MockedRaiden],
   value = amount,
+  { secrethash: secrethash_ }: { secrethash: Hash } = { secrethash },
 ): Promise<TransferState> {
   await ensureChannelIsDeposited([raiden, partner], value); // from partner to raiden
-  if (secrethash in partner.store.getState().received)
-    return raiden.store.getState().sent[secrethash];
+  try {
+    return await getTransfer(
+      raiden,
+      transferKey({ direction: Direction.SENT, secrethash: secrethash_ }),
+    );
+  } catch (e) {}
 
   const paymentId = makePaymentId();
-  const sentPromise = raiden.deps.latest$
-    .pipe(
-      first(({ state }) => secrethash in state.sent),
-      pluck('state', 'sent', secrethash),
-    )
-    .toPromise();
+  const sentPromise = getTransfer(
+    raiden,
+    transferKey({ direction: Direction.SENT, secrethash: secrethash_ }),
+    true,
+  );
   raiden.store.dispatch(
     transfer.request(
       {
@@ -380,23 +413,17 @@ export async function ensureTransferPending(
         value,
         paths: [{ path: [partner.address], fee: Zero as Int<32> }],
         paymentId,
-        secret,
       },
-      { secrethash, direction: Direction.SENT },
+      { secrethash: secrethash_, direction: Direction.SENT },
     ),
   );
   const sent = await sentPromise;
 
-  const receivedPromise = partner.deps.latest$
-    .pipe(first(({ state }) => secrethash in state.received))
-    .toPromise();
-  partner.store.dispatch(
-    messageReceived(
-      { text: '', message: untime(sent.transfer), ts: Date.now() },
-      { address: raiden.address },
-    ),
+  await getTransfer(
+    partner,
+    transferKey({ direction: Direction.RECEIVED, secrethash: secrethash_ }),
+    true,
   );
-  await receivedPromise;
   return sent;
 }
 
@@ -407,36 +434,52 @@ export async function ensureTransferPending(
  * @param clients.0 - Transfer sender node
  * @param clients.1 - Transfer receiver node
  * @param value - Value to transfer
+ * @param opts - Transfer options
+ * @param opts.secret - Secret to use
  * @returns Promise to sent TransferState
  */
 export async function ensureTransferUnlocked(
   [raiden, partner]: [MockedRaiden, MockedRaiden],
   value = amount,
+  { secret: secret_ }: { secret: Secret } = { secret },
 ): Promise<TransferState> {
-  await ensureTransferPending([raiden, partner], value); // from partner to raiden
-  if (partner.store.getState().received[secrethash]?.unlock)
-    return partner.store.getState().received[secrethash];
-
-  const sentPromise = raiden.deps.latest$
-    .pipe(
-      first(({ state }) => !!state.sent[secrethash]?.unlock),
-      pluck('state', 'sent', secrethash),
+  const secrethash = getSecrethash(secret_);
+  await ensureTransferPending([raiden, partner], value, { secrethash }); // from partner to raiden
+  try {
+    if (
+      (await getTransfer(partner, transferKey({ direction: Direction.RECEIVED, secrethash })))
+        .unlock
     )
-    .toPromise();
+      return await getTransfer(raiden, transferKey({ direction: Direction.SENT, secrethash }));
+  } catch (e) {}
+
+  const sentPromise = getTransfer(
+    raiden,
+    transferKey({ direction: Direction.SENT, secrethash }),
+    (doc) => !!doc.unlockProcessed,
+  );
+  raiden.store.dispatch(
+    transferSecret({ secret: secret_ }, { secrethash, direction: Direction.SENT }),
+  );
   raiden.store.dispatch(
     transferUnlock.request(undefined, { secrethash, direction: Direction.SENT }),
   );
-  const sent = await sentPromise;
+  await sentPromise;
 
-  const receivedPromise = partner.deps.latest$
-    .pipe(first(({ state }) => !!state.received[secrethash]?.unlock))
-    .toPromise();
-  partner.store.dispatch(
-    messageReceived(
-      { text: '', message: untime(sent.unlock!), ts: Date.now() },
-      { address: raiden.address },
-    ),
+  await getTransfer(
+    partner,
+    transferKey({ direction: Direction.RECEIVED, secrethash }),
+    (doc) => !!doc.unlockProcessed,
   );
-  await receivedPromise;
-  return sent;
+  return await sentPromise;
+}
+
+/**
+ * @param clients - Raiden Clients
+ * @param clients.0 - Us
+ * @param clients.1 - Partner
+ */
+export function expectChannelsAreInSync([raiden, partner]: [MockedRaiden, MockedRaiden]) {
+  expect(getChannel(raiden, partner).own).toStrictEqual(getChannel(partner, raiden).partner);
+  expect(getChannel(raiden, partner).partner).toStrictEqual(getChannel(partner, raiden).own);
 }
