@@ -278,14 +278,14 @@ async function main() {
   await checkDisclaimer(argv.acceptDisclaimer);
   const wallet = await getWallet(argv.keystorePath, argv.address, argv.passwordFile);
   setupLoglevel(argv.logFile);
-  const localStorage = createLocalStorage(argv.datadir);
+  const storage = createLocalStorage(argv.datadir);
   const endpoint = parseEndpoint(argv.apiAddress);
   const config = await createRaidenConfig(argv);
 
   const raiden = await Raiden.create(
     argv.ethRpcEndpoint,
     wallet.privateKey,
-    localStorage,
+    { storage, prefix: argv.datadir.endsWith('/') ? argv.datadir : argv.datadir + '/' },
     argv.userDepositContractAddress,
     config,
   );
