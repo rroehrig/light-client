@@ -251,6 +251,10 @@ function makeAndSignUnlock$(
     signed$ = of(transferState.unlock!);
   } else {
     assert(transferState.secret, 'unknown secret'); // never fails because we wait before
+    assert(
+      channel.own.locks.find((lock) => lock.secrethash === secrethash),
+      'transfer already unlocked or expired',
+    );
     // don't forget to check after signature too, may have expired by then
     // allow unlocking past expiration if secret registered on-chain
     assert(doc.secretRegistered || locked.lock.expiration.gt(state.blockNumber), 'lock expired');
@@ -349,7 +353,10 @@ function makeAndSignLockExpired$(
     signed$ = of(transferState.expired!);
   } else {
     assert(locked.lock.expiration.lt(state.blockNumber), 'lock not yet expired');
-    assert(!transferState.unlock, 'transfer already unlocked');
+    assert(
+      channel.own.locks.find((lock) => lock.secrethash === secrethash) && !transferState.unlock,
+      'transfer already unlocked or expired',
+    );
 
     const locksroot = getLocksroot(withoutLock(channel.own, secrethash));
 
@@ -426,7 +433,11 @@ function receiveTransferSigned(
         log.warn('transfer already present', action.meta);
         const msgId = transfer.message_identifier;
         // if transfer matches the stored one, re-send Processed once
-        if (doc.partner === action.meta.address && msgId.eq(doc.transfer.message_identifier)) {
+        if (
+          doc.transferProcessed &&
+          doc.partner === action.meta.address &&
+          msgId.eq(doc.transfer.message_identifier)
+        ) {
           // transferProcessed again will trigger messageSend.request
           return of(
             transferProcessed(

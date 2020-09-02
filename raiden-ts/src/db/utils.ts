@@ -62,6 +62,7 @@ async function makeDatabase(
   name: string,
 ): Promise<RaidenDatabase> {
   const db = new this(name);
+  db.setMaxListeners(30);
 
   await Promise.all([
     db.createIndex({
