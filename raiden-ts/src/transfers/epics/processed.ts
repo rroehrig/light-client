@@ -7,9 +7,8 @@ import { Processed } from '../../messages/types';
 import { getBalanceProofFromEnvelopeMessage, isMessageReceivedOfType } from '../../messages/utils';
 import { RaidenState } from '../../state';
 import { RaidenEpicDeps } from '../../types';
-import { Signed, isntNil, decode } from '../../utils/types';
+import { Signed, isntNil } from '../../utils/types';
 import { isActionOf } from '../../utils/actions';
-import { TransferStateish } from '../../db/types';
 import { get$ } from '../../db/utils';
 import {
   transfer,
@@ -17,7 +16,7 @@ import {
   transferProcessed,
   transferUnlockProcessed,
 } from '../actions';
-import { Direction, TransferState } from '../state';
+import { Direction } from '../state';
 import { transferKey } from '../utils';
 
 /**
@@ -28,37 +27,32 @@ import { transferKey } from '../utils';
  * @param state$ - Observable of RaidenStates
  * @param deps - Epics dependencies
  * @param deps.db - Database instance
- * @param deps.log - Logger instance
  * @returns Observable of transfer*Processed|transfer.success actions
  */
 export const transferProcessedReceivedEpic = (
   action$: Observable<RaidenAction>,
   {}: Observable<RaidenState>,
-  { log, db }: RaidenEpicDeps,
+  { db }: RaidenEpicDeps,
 ): Observable<
   transfer.success | transferProcessed | transferUnlockProcessed | transferExpireProcessed
 > =>
   action$.pipe(
     filter(isMessageReceivedOfType(Signed(Processed))),
     mergeMap((action) =>
-      defer(async () => {
-        const hex = action.payload.message.message_identifier.toHexString();
-        return db.find({
-          selector: {
-            direction: Direction.SENT,
-            partner: action.meta.address,
-            $or: [
-              { 'transfer.message_identifier._hex': hex },
-              { 'unlock.message_identifier._hex': hex },
-              { 'expired.message_identifier._hex': hex },
-            ],
-          },
-        });
-      }).pipe(
-        mergeMap((result) => {
-          if (result.warning) log.warn(result.warning, action);
-          return from(result.docs as TransferStateish[]);
-        }),
+      defer(() =>
+        from(
+          db.transfers
+            .chain()
+            .find({ direction: Direction.SENT, partner: action.meta.address })
+            .where(
+              (r) =>
+                r.transfer.message_identifier.eq(action.payload.message.message_identifier) ||
+                !!r.unlock?.message_identifier?.eq?.(action.payload.message.message_identifier) ||
+                !!r.expired?.message_identifier?.eq?.(action.payload.message.message_identifier),
+            )
+            .data(),
+        ),
+      ).pipe(
         mergeMap(function* (doc) {
           const meta = { secrethash: doc.secrethash, direction: Direction.SENT };
           if (action.payload.message.message_identifier.eq(doc.transfer.message_identifier)) {
@@ -69,9 +63,7 @@ export const transferProcessedReceivedEpic = (
             // Unlock's Processed also notifies whole transfer as success
             yield transfer.success(
               {
-                balanceProof: getBalanceProofFromEnvelopeMessage(
-                  decode(TransferState, doc).unlock!,
-                ),
+                balanceProof: getBalanceProofFromEnvelopeMessage(doc.unlock!),
               },
               meta,
             );
@@ -105,7 +97,7 @@ export const transferProcessedSendEpic = (
     // transfer direction is RECEIVED, not message direction (which is outbound)
     filter((action) => action.meta.direction === Direction.RECEIVED),
     mergeMap((action) =>
-      get$<TransferStateish>(db, transferKey(action.meta)).pipe(
+      get$(db.transfers, transferKey(action.meta)).pipe(
         filter(isntNil),
         map((doc) =>
           messageSend.request(

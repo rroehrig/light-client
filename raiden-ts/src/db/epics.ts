@@ -1,19 +1,10 @@
 import { Observable } from 'rxjs';
-import {
-  distinctUntilChanged,
-  concatMap,
-  ignoreElements,
-  pairwise,
-  mergeMap,
-  groupBy,
-  finalize,
-} from 'rxjs/operators';
+import { distinctUntilChanged, ignoreElements, pairwise, finalize, tap } from 'rxjs/operators';
 
 import { RaidenAction } from '../actions';
 import { RaidenState } from '../state';
 import { RaidenEpicDeps } from '../types';
-import { channelUniqueKey } from '../channels/utils';
-import { upsert$ } from './utils';
+import { upsert } from './utils';
 
 /**
  * Update state based on actions and state changes
@@ -35,7 +26,7 @@ export const dbStateEpic = (
   state$.pipe(
     distinctUntilChanged(),
     pairwise(),
-    mergeMap(function* ([prev, cur]) {
+    tap(([prev, cur]) => {
       for (const k in cur) {
         const key = k as keyof RaidenState;
         // key has same value, pass over
@@ -44,16 +35,14 @@ export const dbStateEpic = (
           // iterate over channels separately
           for (const id in cur[key]) {
             if (cur[key][id] === prev[key][id]) continue;
-            yield { _id: `channels.${channelUniqueKey(cur[key][id])}`, ...cur[key][id] };
+            upsert(db.channels, cur[key][id]);
           }
-        } else yield { _id: `state.${key}`, value: cur[key] } as const;
+        } else upsert(db.state, { _id: key, value: cur[key] });
         // notice we don't handle deleted values: the set of top-level keys are constant,
         // oldChannels aren't deleted, and current channels are only moved to oldChannels,
         // which share the [channelUniqueKey], so they get replaced
       }
     }),
-    groupBy(({ _id }) => _id),
-    mergeMap((grouped$) => grouped$.pipe(concatMap((doc) => upsert$(db, doc)))),
     ignoreElements(),
   );
 
@@ -73,5 +62,7 @@ export const dbShutdownEpic = (
 ): Observable<never> =>
   action$.pipe(
     ignoreElements(),
-    finalize(() => db.close()),
+    finalize(() => {
+      db.db.close(() => db.storage.close());
+    }),
   );

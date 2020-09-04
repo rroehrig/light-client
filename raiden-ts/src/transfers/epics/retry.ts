@@ -8,7 +8,6 @@ import { RaidenState } from '../../state';
 import { RaidenEpicDeps } from '../../types';
 import { isActionOf } from '../../utils/actions';
 import { get$ } from '../../db/utils';
-import { TransferStateish } from '../../db/types';
 import {
   transferExpire,
   transferSigned,
@@ -47,7 +46,7 @@ const signedRetryMessage$ = (
         { message: signed },
         { address: signed.recipient, msgId: signed.message_identifier.toString() },
       );
-      const notifier = get$<TransferStateish>(db, transferKey(action.meta)).pipe(
+      const notifier = get$(db.transfers, transferKey(action.meta)).pipe(
         filter(
           (doc) =>
             !!(
@@ -87,7 +86,7 @@ const unlockedRetryMessage$ = (
   { db, config$ }: Pick<RaidenEpicDeps, 'db' | 'config$'>,
 ): Observable<messageSend.request> => {
   if (action.meta.direction !== Direction.SENT) return EMPTY;
-  const doc$ = get$<TransferStateish>(db, transferKey(action.meta));
+  const doc$ = get$(db.transfers, transferKey(action.meta));
   return doc$.pipe(
     first(),
     withLatestFrom(config$),
@@ -129,7 +128,7 @@ const expiredRetryMessages$ = (
   { db, config$ }: Pick<RaidenEpicDeps, 'db' | 'config$'>,
 ): Observable<messageSend.request> => {
   if (action.meta.direction !== Direction.SENT) return EMPTY;
-  const doc$ = get$<TransferStateish>(db, transferKey(action.meta));
+  const doc$ = get$(db.transfers, transferKey(action.meta));
   return doc$.pipe(
     first(),
     withLatestFrom(config$),
@@ -161,7 +160,7 @@ const secretRequestRetryMessage$ = (
   { db, config$ }: Pick<RaidenEpicDeps, 'db' | 'config$'>,
 ): Observable<messageSend.request> => {
   if (action.meta.direction !== Direction.RECEIVED) return EMPTY;
-  const doc$ = get$<TransferStateish>(db, transferKey(action.meta));
+  const doc$ = get$(db.transfers, transferKey(action.meta));
   return doc$.pipe(
     first(),
     withLatestFrom(config$),
@@ -198,7 +197,7 @@ const secretRevealRetryMessage$ = (
   { db, config$ }: Pick<RaidenEpicDeps, 'db' | 'config$'>,
 ): Observable<messageSend.request> => {
   if (action.meta.direction !== Direction.RECEIVED) return EMPTY;
-  const doc$ = get$<TransferStateish>(db, transferKey(action.meta));
+  const doc$ = get$(db.transfers, transferKey(action.meta));
   return doc$.pipe(
     first(),
     withLatestFrom(config$),

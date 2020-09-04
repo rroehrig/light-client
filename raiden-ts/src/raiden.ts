@@ -12,7 +12,7 @@ import { createLogger } from 'redux-logger';
 import constant from 'lodash/constant';
 import memoize from 'lodash/memoize';
 import { Observable, AsyncSubject, merge, defer, EMPTY, ReplaySubject, of } from 'rxjs';
-import { first, filter, map, mergeMap, skip, timeout } from 'rxjs/operators';
+import { first, filter, map, mergeMap, skip } from 'rxjs/operators';
 import logging from 'loglevel';
 
 import { TokenNetworkRegistryFactory } from './contracts/TokenNetworkRegistryFactory';
@@ -30,7 +30,7 @@ import { ShutdownReason } from './constants';
 import { RaidenState } from './state';
 import { RaidenConfig, PartialRaidenConfig, makeDefaultConfig } from './config';
 import { RaidenChannels, ChannelState } from './channels/state';
-import { RaidenTransfer, Direction, TransferState } from './transfers/state';
+import { RaidenTransfer, Direction } from './transfers/state';
 import { raidenReducer } from './reducer';
 import { raidenRootEpic, getLatest$ } from './epics';
 import {
@@ -80,7 +80,7 @@ import {
   getState,
 } from './helpers';
 import { RaidenError, ErrorCodes } from './utils/error';
-import { RaidenDatabase, TransferStateish } from './db/types';
+import { RaidenDatabase } from './db/types';
 import { get$, dumpDatabaseToArray } from './db/utils';
 
 export class Raiden {
@@ -957,36 +957,29 @@ export class Raiden {
 
   /**
    * Waits for the transfer identified by a secrethash to fail or complete
+   * The returned promise will resolve with the final transfer state, or reject if anything fails
    *
-   * The returned promise will resolve with the final amount received by the target
-   *
-   * @param transferKey - Transfer identifier
-   * @returns Amount received by target, as informed by them on SecretRequest
+   * @param transferKey - Transfer identifier as returned by [[transfer]]
+   * @returns Promise to final RaidenTransfer
    */
-  public async waitTransfer(transferKey: string): Promise<BigNumber | undefined> {
+  public async waitTransfer(transferKey: string): Promise<RaidenTransfer> {
     const { direction, secrethash } = transferKeyToMeta(transferKey);
-    const transferDoc = await get$<TransferStateish>(this.deps.db, transferKey)
-      .pipe(first(), timeout(this.config.pollingInterval))
-      .toPromise();
-    assert(transferDoc, ErrorCodes.RDN_UNKNOWN_TRANSFER, this.log.info);
+    const doc = this.deps.db.transfers.by('_id', transferKey);
+    assert(doc, ErrorCodes.RDN_UNKNOWN_TRANSFER, this.log.info);
 
-    const transferState = decode(TransferState, transferDoc);
-    const raidenTransf = raidenTransfer(transferState);
+    const raidenTransf = raidenTransfer(doc);
     // already completed/past transfer
     if (raidenTransf.completed) {
-      if (raidenTransf.success) return transferState.secretRequest?.amount;
+      if (raidenTransf.success) return raidenTransf;
       else
         throw new RaidenError(ErrorCodes.XFER_ALREADY_COMPLETED, { status: raidenTransf.status });
     }
 
     // throws/rejects if a failure occurs
     await asyncActionToPromise(transfer, { secrethash, direction }, this.action$);
-    const finalState = decode(
-      TransferState,
-      await get$<TransferStateish>(this.deps.db, transferKey)
-        .pipe(first((doc) => !!doc.unlockProcessed))
-        .toPromise(),
-    );
+    const finalState = await get$(this.deps.db.transfers, transferKey)
+      .pipe(first((doc) => !!doc.unlockProcessed))
+      .toPromise();
     this.log.info('Transfer successful', {
       key: transferKey,
       partner: finalState.partner,
@@ -997,7 +990,7 @@ export class Raiden {
       targetReceived: finalState.secretRequest?.amount?.toString?.(),
       transferTime: finalState.unlockProcessed!.ts - finalState.transfer.ts,
     });
-    return finalState.secretRequest?.amount;
+    return raidenTransfer(finalState);
   }
 
   /**

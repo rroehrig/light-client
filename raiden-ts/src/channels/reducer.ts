@@ -77,8 +77,9 @@ function channelOpenSuccessReducer(state: RaidenState, action: channelOpen.succe
   )
     return state;
   const channel: Channel = {
-    state: ChannelState.open,
+    _id: channelUniqueKey({ ...action.meta, id: action.payload.id }),
     id: action.payload.id,
+    state: ChannelState.open,
     token: action.payload.token,
     tokenNetwork: action.meta.tokenNetwork,
     settleTimeout: action.payload.settleTimeout,

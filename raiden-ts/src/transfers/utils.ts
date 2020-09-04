@@ -185,7 +185,8 @@ export function findBalanceProofMatchingBalanceHash$(
 ) {
   if (balanceHash === HashZero) return of(BalanceProofZero);
   return defer(() =>
-    db.find({ selector: { channel: channelUniqueKey(channel), direction } }),
+    // use db.storage directly instead of db.transfers to search on historical data
+    db.storage.find({ selector: { channel: channelUniqueKey(channel), direction } }),
   ).pipe(
     mergeMap(({ docs }) => from(docs as TransferStateish[])),
     mergeMap((doc) => {

@@ -1413,11 +1413,11 @@ export const confirmationEpic = (
   state$: Observable<RaidenState>,
   { config$, provider, latest$ }: RaidenEpicDeps,
 ): Observable<RaidenAction> =>
-  combineLatest(
+  combineLatest([
     state$.pipe(pluckDistinct('blockNumber')),
     state$.pipe(pluck('pendingTxs')),
     config$.pipe(pluckDistinct('confirmationBlocks')),
-  ).pipe(
+  ]).pipe(
     filter(([, pendingTxs]) => pendingTxs.length > 0),
     // exhaust will ignore blocks while concat$ is busy
     exhaustMap(([blockNumber, pendingTxs, confirmationBlocks]) =>

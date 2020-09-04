@@ -1,6 +1,8 @@
 import type { BigNumber, BigNumberish } from 'ethers/utils';
 import type logging from 'loglevel';
+import type Loki from 'lokijs';
 
+import { Channel } from '../channels/state';
 import type { TransferState } from '../transfers/state';
 import { Address } from '../utils/types';
 
@@ -17,9 +19,12 @@ export interface TransferStateish extends AsBigNumberish<TransferState> {
   _rev: string;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type StateMember = { _id: string; value: any };
+
 export type Migrations = {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  readonly [version: number]: (doc: any, db: RaidenDatabase) => Promise<any[]>;
+  readonly [version: number]: (doc: any, db: RaidenStorage) => Promise<any[]>;
 };
 
 export interface RaidenDatabaseMeta {
@@ -38,11 +43,21 @@ export type RaidenDatabaseOptions = {
   | PouchDB.Configuration.RemoteDatabaseConfiguration
 );
 
-export interface RaidenDatabase extends PouchDB.Database {
-  constructor: RaidenDatabaseConstructor;
+export interface RaidenStorage extends PouchDB.Database {
+  constructor: RaidenStorageConstructor;
 }
 
-export type RaidenDatabaseConstructor = (new (
+export type RaidenStorageConstructor = (new (
   name?: string,
-  options?: PouchDB.Configuration.LocalDatabaseConfiguration,
-) => RaidenDatabase) & { __defaults: RaidenDatabaseOptions };
+  options?:
+    | PouchDB.Configuration.LocalDatabaseConfiguration
+    | PouchDB.Configuration.RemoteDatabaseConfiguration,
+) => RaidenStorage) & { __defaults: RaidenDatabaseOptions };
+
+export interface RaidenDatabase {
+  storage: RaidenStorage;
+  db: Loki;
+  state: Loki.Collection<StateMember>;
+  channels: Loki.Collection<Channel>;
+  transfers: Loki.Collection<TransferState>;
+}

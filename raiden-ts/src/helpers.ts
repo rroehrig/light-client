@@ -4,7 +4,7 @@ import { Contract, ContractReceipt, ContractTransaction } from 'ethers/contract'
 import { Network, toUtf8Bytes, sha256 } from 'ethers/utils';
 import { JsonRpcProvider } from 'ethers/providers';
 import { MaxUint256 } from 'ethers/constants';
-import { Observable, defer } from 'rxjs';
+import { Observable, defer, merge, fromEvent } from 'rxjs';
 import { filter, map, pluck, withLatestFrom, first, exhaustMap } from 'rxjs/operators';
 import logging from 'loglevel';
 
@@ -37,7 +37,7 @@ import {
   changes$,
   putRaidenState,
   migrateDatabase,
-  loadDatabase,
+  replaceDatabase,
   legacyStateMigration,
   getDatabaseConstructorFromOptions,
 } from './db/utils';
@@ -171,17 +171,19 @@ export const getSigner = async (
  * @returns observable of sent and completed Raiden transfers
  */
 export function initTransfers$(db: RaidenDatabase): Observable<RaidenTransfer> {
-  return changes$<TransferStateish>(db, {
-    since: 0,
-    live: true,
-    include_docs: true,
-    selector: { direction: { $in: Object.values(Direction) } },
-  }).pipe(
-    pluck('doc'),
-    filter(isntNil),
-    map((doc) => decode(TransferState, doc)),
-    map(raidenTransfer),
-  );
+  return merge(
+    changes$<TransferStateish>(db.storage, {
+      since: 0,
+      include_docs: true,
+      selector: { direction: { $in: Object.values(Direction) } },
+    }).pipe(
+      pluck('doc'),
+      filter(isntNil),
+      map((doc) => decode(TransferState, doc)),
+    ),
+    fromEvent<TransferState>(db.transfers, 'insert'),
+    fromEvent<[TransferState]>(db.transfers, 'update').pipe(pluck(0)),
+  ).pipe(map(raidenTransfer));
 }
 
 /**
@@ -469,7 +471,7 @@ export async function getState(
   if (dump) {
     if (typeof dump === 'string') dump = jsonParse(dump);
     if (!Array.isArray(dump)) dump = Array.from(legacyStateMigration(dump));
-    db = await loadDatabase.call(dbCtor, dump, dbName);
+    db = await replaceDatabase.call(dbCtor, dump, dbName);
     if (fromLocalStorage) storage?.storage!.removeItem(dbName);
   } else {
     db = await migrateDatabase.call(dbCtor, dbName);

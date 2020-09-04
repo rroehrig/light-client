@@ -45,12 +45,10 @@ const _TransferState = t.readonly(
       secretRegistered: Timed(t.type({ txHash: Hash, txBlock: t.number })),
       /** <- incoming processed for locked transfer */
       transferProcessed: Timed(Signed(Processed)),
-      /**
-       * !! channel was closed !!
-       * In the case a channel is closed (possibly middle transfer), this will be the txHash of the
-       * CloseChannel transaction. No further actions are possible after it's set.
-       */
+      /** !! channel was closed !!  */
       channelClosed: Timed(t.type({ txHash: Hash, txBlock: t.number })),
+      /** channel was settled */
+      channelSettled: Timed(t.type({ txHash: Hash, txBlock: t.number })),
       /**
        * <- incoming secret request from target
        * If this is set, it means the target requested the secret, not necessarily with a valid

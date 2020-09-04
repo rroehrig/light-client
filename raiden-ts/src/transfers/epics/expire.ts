@@ -1,4 +1,4 @@
-import { from, defer, merge, Observable, of } from 'rxjs';
+import { from, merge, Observable, of } from 'rxjs';
 import { exhaustMap, filter, mergeMap, pluck, withLatestFrom } from 'rxjs/operators';
 
 import { RaidenAction } from '../../actions';
@@ -7,7 +7,6 @@ import { RaidenState } from '../../state';
 import { RaidenEpicDeps } from '../../types';
 import { isResponseOf } from '../../utils/actions';
 import { RaidenError, ErrorCodes } from '../../utils/error';
-import { TransferStateish } from '../../db/types';
 import { transfer, transferExpire } from '../actions';
 import { Direction } from '../state';
 import { dispatchAndWait$ } from './utils';
@@ -23,13 +22,12 @@ import { dispatchAndWait$ } from './utils';
  * @param deps - Epics dependencies
  * @param deps.config$ - Config observable
  * @param deps.db - Database instance
- * @param deps.log - Logger instance
  * @returns Observable of transferExpire.request|transfer.failure actions
  */
 export const transferAutoExpireEpic = (
   action$: Observable<RaidenAction>,
   {}: Observable<RaidenState>,
-  { log, config$, db }: RaidenEpicDeps,
+  { config$, db }: RaidenEpicDeps,
 ): Observable<transferExpire.request | transfer.failure> =>
   action$.pipe(
     filter(newBlock.is),
@@ -41,23 +39,21 @@ export const transferAutoExpireEpic = (
     // multiple signing requests would be emited *for the same lock*.
     // `exhaustMap` prevents that from happening, by blocking new signing
     // requests until the existing ones have been concluded.
-    exhaustMap(([blockNumber, { confirmationBlocks }]) => {
-      return defer(() =>
-        db.find({
-          selector: {
-            direction: Direction.SENT,
-            unlock: { $exists: false }, // not unlocked
-            expired: { $exists: false }, // not expired
-            secretRegistered: { $exists: false }, // not registered
-            channelClosed: { $exists: false }, // not closed
-            expiration: { $lte: blockNumber - confirmationBlocks * 2 },
-          },
-        }),
+    exhaustMap(([blockNumber, { confirmationBlocks }]) =>
+      from(
+        db.transfers
+          .chain()
+          .find({ direction: Direction.SENT })
+          .where(
+            (r) =>
+              !r.unlock &&
+              !r.expired &&
+              !r.secretRegistered &&
+              !r.channelClosed &&
+              r.expiration <= blockNumber - confirmationBlocks * 2,
+          )
+          .data(),
       ).pipe(
-        mergeMap(({ docs, warning }) => {
-          if (warning) log.warn(warning, 'transferAutoExpireEpic');
-          return from(docs as TransferStateish[]);
-        }),
         mergeMap((doc) => {
           const meta = { secrethash: doc.transfer.lock.secrethash, direction: Direction.SENT };
           // this observable acts like a Promise: emits request once, completes on success/failure
@@ -78,6 +74,6 @@ export const transferAutoExpireEpic = (
             ),
           );
         }),
-      );
-    }),
+      ),
+    ),
   );

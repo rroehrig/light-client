@@ -13,7 +13,6 @@ import {
   exhaustMap,
   ignoreElements,
   switchMap,
-  timeout,
   takeUntil,
   endWith,
 } from 'rxjs/operators';
@@ -30,9 +29,8 @@ import { isActionOf, isConfirmationResponseOf } from '../../utils/actions';
 import { RaidenError, ErrorCodes, assert } from '../../utils/error';
 import { fromEthersEvent, logToContractEvent } from '../../utils/ethers';
 import { pluckDistinct, takeIf } from '../../utils/rx';
-import { Hash, Secret, Signed, UInt, isntNil, decode } from '../../utils/types';
+import { Hash, Secret, Signed, UInt, isntNil } from '../../utils/types';
 import { get$ } from '../../db/utils';
-import { TransferStateish } from '../../db/types';
 import {
   transfer,
   transferSecret,
@@ -42,7 +40,7 @@ import {
   transferUnlock,
 } from '../actions';
 import { getSecrethash, makeMessageId, transferKey } from '../utils';
-import { Direction, TransferState } from '../state';
+import { Direction } from '../state';
 import { chooseOnchainAccount, getContractWithSigner } from '../../helpers';
 import { Capabilities } from '../../constants';
 import { dispatchAndWait$ } from './utils';
@@ -57,28 +55,24 @@ import { dispatchAndWait$ } from './utils';
  * @param deps.address - Our address
  * @param deps.log - Logger instance
  * @param deps.db - Database instance
- * @param deps.config$ - Config observable
  * @returns Observable of transferSecretRequest actions
  */
 export const transferSecretRequestedEpic = (
   action$: Observable<RaidenAction>,
   {}: Observable<RaidenState>,
-  { address, log, db, config$ }: RaidenEpicDeps,
+  { address, log, db }: RaidenEpicDeps,
 ): Observable<transferSecretRequest> =>
   action$.pipe(
     filter(isMessageReceivedOfType(Signed(SecretRequest))),
-    withLatestFrom(config$),
-    mergeMap(([action, { pollingInterval }]) =>
-      get$<TransferStateish>(
-        db,
+    mergeMap((action) =>
+      get$(
+        db.transfers,
         transferKey({
           direction: Direction.SENT,
           secrethash: action.payload.message.secrethash,
         }),
       ).pipe(
         first((doc) => !!doc.secret),
-        timeout(pollingInterval),
-        catchError(() => EMPTY),
         map((doc) => [action, doc] as const),
       ),
     ),
@@ -119,17 +113,16 @@ const secretReveal$ = (
   { signer, log, db, latest$ }: Pick<RaidenEpicDeps, 'signer' | 'log' | 'db' | 'latest$'>,
 ): Observable<transfer.failure | transferSecretReveal | messageSend.request> => {
   const request = action.payload.message;
-  return get$<TransferStateish>(db, transferKey(action.meta)).pipe(
+  return get$(db.transfers, transferKey(action.meta)).pipe(
     first(),
     withLatestFrom(latest$),
     mergeMap(([doc, { state }]) => {
-      const transferState = decode(TransferState, doc);
       // shouldn't happen, as we're the initiator (for now), and always know the secret
-      assert(transferState.secret, 'SecretRequest for unknown secret');
+      assert(doc.secret, 'SecretRequest for unknown secret');
 
-      const locked = transferState.transfer;
+      const locked = doc.transfer;
       const target = locked.target;
-      const fee = transferState.fee;
+      const fee = doc.fee;
       const value = locked.lock.amount.sub(fee) as UInt<32>;
 
       assert(
@@ -144,12 +137,12 @@ const secretReveal$ = (
       }
 
       let reveal$: Observable<Signed<SecretReveal>>;
-      if (transferState.secretReveal) reveal$ = of(transferState.secretReveal);
+      if (doc.secretReveal) reveal$ = of(doc.secretReveal);
       else {
         const message: SecretReveal = {
           type: MessageType.SECRET_REVEAL,
           message_identifier: makeMessageId(),
-          secret: transferState.secret,
+          secret: doc.secret,
         };
         reveal$ = from(signMessage(signer, message, { log }));
       }
@@ -210,25 +203,19 @@ export const transferSecretRevealEpic = (
  * @param state$ - Observable of RaidenStates
  * @param deps - Epics dependencies
  * @param deps.db - Database instance
- * @param deps.log - Logger instance
  * @returns Observable of output actions for this epic
  */
 export const transferSecretRevealedEpic = (
   action$: Observable<RaidenAction>,
   {}: Observable<RaidenState>,
-  { log, db }: RaidenEpicDeps,
+  { db }: RaidenEpicDeps,
 ): Observable<transferUnlock.request | transferSecret> =>
   action$.pipe(
     // we don't require Signed SecretReveal, nor even check sender for persisting the secret
     filter(isMessageReceivedOfType(SecretReveal)),
-    mergeMap(async (action) => {
+    mergeMap(function* (action) {
       const secrethash = getSecrethash(action.payload.message.secret);
-      return db.find({ selector: { secrethash } }).then(({ docs, warning }) => {
-        if (warning) log.warn(warning, action);
-        return [action, secrethash, docs as TransferStateish[]] as const;
-      });
-    }),
-    mergeMap(function* ([action, secrethash, results]) {
+      const results = db.transfers.find({ secrethash });
       const message = action.payload.message;
       const sent = results.find((doc) => doc.direction === Direction.SENT);
       if (sent) {
@@ -283,7 +270,7 @@ export const transferRequestUnlockEpic = (
     filter(isActionOf([transferSecret, transferSecretRegister.success])),
     filter((action) => action.meta.direction === Direction.RECEIVED),
     concatMap((action) =>
-      get$<TransferStateish>(db, transferKey(action.meta)).pipe(
+      get$(db.transfers, transferKey(action.meta)).pipe(
         first(),
         filter((doc) => !doc.secretReveal),
         mergeMap(() => {
@@ -309,7 +296,6 @@ export const transferRequestUnlockEpic = (
  * @param action$ - Observable of RaidenActions
  * @param state$ - Observable of RaidenStates
  * @param deps - Epics dependencies
- * @param deps.log - Logger instance
  * @param deps.provider - Provider instance
  * @param deps.secretRegistryContract - SecretRegistry contract instance
  * @param deps.config$ - Config observable
@@ -319,7 +305,7 @@ export const transferRequestUnlockEpic = (
 export const monitorSecretRegistryEpic = (
   {}: Observable<RaidenAction>,
   state$: Observable<RaidenState>,
-  { log, provider, secretRegistryContract, config$, db }: RaidenEpicDeps,
+  { provider, secretRegistryContract, config$, db }: RaidenEpicDeps,
 ): Observable<transferSecretRegister.success> =>
   config$.pipe(
     pluckDistinct('confirmationBlocks'),
@@ -333,20 +319,10 @@ export const monitorSecretRegistryEpic = (
     ),
     map(logToContractEvent<[Hash, Secret, Event]>(secretRegistryContract)),
     filter(isntNil),
-    // find sent|received transfers matching secrethash and secret registered before expiration
-    mergeMap(([secrethash, secret, event]) =>
-      db.find({ selector: { secrethash } }).then(({ docs, warning }) => {
-        if (warning) log.warn(warning, { secrethash });
-        return [secrethash, secret, event, docs as TransferStateish[]] as const;
-      }),
-    ),
-    filter(([, , , results]) => results.length > 0),
     withLatestFrom(state$, config$),
-    mergeMap(function* ([
-      [secrethash, secret, event, results],
-      { blockNumber },
-      { confirmationBlocks },
-    ]) {
+    mergeMap(function* ([[secrethash, secret, event], { blockNumber }, { confirmationBlocks }]) {
+      // find sent|received transfers matching secrethash and secret registered before expiration
+      const results = db.transfers.find({ secrethash });
       for (const doc of results)
         yield transferSecretRegister.success(
           {
@@ -386,7 +362,6 @@ export const transferSuccessOnSecretRegisteredEpic = (
  * @param action$ - Observable of newBlock actions
  * @param state$ - Observable of RaidenStates
  * @param deps - Epics dependencies
- * @param deps.log - Logger instance
  * @param deps.config$ - Config observable
  * @param deps.db - Database instance
  * @returns Observable of transferSecretRegister.request actions
@@ -394,29 +369,27 @@ export const transferSuccessOnSecretRegisteredEpic = (
 export const transferAutoRegisterEpic = (
   action$: Observable<RaidenAction>,
   {}: Observable<RaidenState>,
-  { log, config$, db }: RaidenEpicDeps,
+  { config$, db }: RaidenEpicDeps,
 ): Observable<transferSecretRegister.request> => {
   const blockNumber$ = action$.pipe(filter(newBlock.is), pluck('payload', 'blockNumber'));
   return blockNumber$.pipe(
     withLatestFrom(config$),
     exhaustMap(([blockNumber, { revealTimeout }]) =>
-      defer(() =>
-        db.find({
-          selector: {
-            direction: Direction.RECEIVED,
-            unlock: { $exists: false }, // not unlocked
-            expired: { $exists: false }, // not expired
-            secretRegistered: { $exists: false }, // secret exists, and not registered
-            secret: { $exists: true },
-            // get transfers which are inside the danger zone (revealTimeout before expiration)
-            expiration: { $gt: blockNumber, $lte: blockNumber + revealTimeout },
-          },
-        }),
-      ).pipe(
-        mergeMap(({ docs, warning }) => {
-          if (warning) log.warn(warning, 'transferAutoRegisterEpic');
-          return from(docs as TransferStateish[]);
-        }),
+      from(
+        db.transfers
+          .chain()
+          .find({ direction: Direction.RECEIVED })
+          .where(
+            (r) =>
+              !r.unlock && // not unlocked
+              !r.expired && // not expired
+              !!r.secret && // secret exist and isn't registered yet
+              !r.secretRegistered &&
+              // transfers which are inside the danger zone (revealTimeout before expiration)
+              r.expiration > blockNumber &&
+              r.expiration <= blockNumber + revealTimeout,
+          )
+          .data(),
       ),
     ),
     // emit each result every block
@@ -426,7 +399,7 @@ export const transferAutoRegisterEpic = (
       identity, // elementSelector
       // durationSelector: should emit when we want to dispose of the grouped$ subject
       (grouped$) =>
-        combineLatest([blockNumber$, get$<TransferStateish>(db, grouped$.key)]).pipe(
+        combineLatest([blockNumber$, get$(db.transfers, grouped$.key)]).pipe(
           filter(
             ([blockNumber, doc]) =>
               !!(doc.expiration < blockNumber || doc.unlock || doc.secretRegistered),

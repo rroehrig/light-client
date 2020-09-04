@@ -56,11 +56,12 @@ export function channelKey<
  * @returns A string, for now
  */
 export function channelUniqueKey<
-  C extends { id: number; tokenNetwork: Address } & (
+  C extends { _id?: string; id: number; tokenNetwork: Address } & (
     | { partner: { address: Address } }
     | { partner: Address }
   )
 >(channel: C): ChannelUniqueKey {
+  if ('_id' in channel && channel._id) return channel._id;
   return `${channelKey(channel)}#${channel.id.toString().padStart(9, '0')}`;
 }
 
