@@ -203,8 +203,7 @@ function sendTransferSigned(
   return combineLatest([state$, deps.config$]).pipe(
     first(),
     mergeMap(([state, config]) => {
-      const doc = deps.db.transfers.by('_id', transferKey(action.meta));
-      if (doc) {
+      if (deps.db.transfersKeys.has(transferKey(action.meta))) {
         // don't throw to avoid emitting transfer.failure, to just wait for already pending transfer
         deps.log.warn('transfer already present', action.meta);
         return EMPTY;
@@ -419,19 +418,20 @@ function receiveTransferSigned(
     first(),
     mergeMap(([state, { revealTimeout, caps }]) => {
       const transfer: Signed<LockedTransfer> = action.payload.message;
-      const doc = db.transfers.by('_id', transferKey(meta));
-      if (doc) {
-        log.warn('transfer already present', action.meta);
+      if (db.transfersKeys.has(transferKey(meta))) {
+        log.warn('transfer already present', meta);
         const msgId = transfer.message_identifier;
+        const doc = db.transfers.by('_id', transferKey(meta));
         // if transfer matches the stored one, re-send Processed once
         if (
-          doc.transferProcessed &&
+          doc?.transferProcessed &&
           doc.partner === action.meta.address &&
           msgId.eq(doc.transfer.message_identifier)
         ) {
           // transferProcessed again will trigger messageSend.request
           return of(transferProcessed({ message: untime(doc.transferProcessed!) }, meta));
-        } else return EMPTY;
+        }
+        return EMPTY;
       }
 
       // full balance proof validation

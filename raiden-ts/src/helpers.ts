@@ -477,10 +477,10 @@ export async function getState(
     db = await migrateDatabase.call(dbCtor, dbName);
   }
 
-  let state = await getRaidenState(db);
+  let state = getRaidenState(db);
   if (!state) {
     state = makeInitialState({ network, address, contractsInfo: contractsInfo });
-    await putRaidenState(db, state);
+    putRaidenState(db, state);
   } else {
     state = decode(RaidenState, state);
   }

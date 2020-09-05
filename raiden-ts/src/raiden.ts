@@ -82,6 +82,7 @@ import {
 import { RaidenError, ErrorCodes } from './utils/error';
 import { RaidenDatabase } from './db/types';
 import { get$, dumpDatabaseToArray } from './db/utils';
+import { createPersisterMiddleware } from './persister';
 
 export class Raiden {
   private readonly store: Store<RaidenState, RaidenAction>;
@@ -274,12 +275,13 @@ export class Raiden {
       RaidenState,
       RaidenEpicDeps
     >({ dependencies: this.deps });
+    const persisterMiddleware = createPersisterMiddleware(db);
 
     this.store = createStore(
       raidenReducer,
       // workaround for redux's PreloadedState issues with branded values
       state as any, // eslint-disable-line @typescript-eslint/no-explicit-any
-      applyMiddleware(loggerMiddleware, this.epicMiddleware),
+      applyMiddleware(loggerMiddleware, this.epicMiddleware, persisterMiddleware),
     );
 
     // populate deps.latest$, to ensure config, logger && pollingInterval are setup before start

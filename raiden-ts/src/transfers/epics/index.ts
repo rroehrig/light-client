@@ -1,4 +1,3 @@
-export * from './db';
 export * from './expire';
 export * from './locked';
 export * from './init';

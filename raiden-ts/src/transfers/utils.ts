@@ -140,7 +140,7 @@ export function raidenTransfer(state: TransferState): RaidenTransfer {
     state.unlockProcessed ||
     state.expiredProcessed ||
     state.secretRegistered ||
-    state.channelClosed
+    state.channelSettled
   );
   return {
     key: transferKey(state),

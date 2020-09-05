@@ -10,19 +10,6 @@ import { RaidenStorage, StateMember } from './types';
 let defaultPouchAdapter: string;
 
 /**
- * @param prefix - Prefix to query for
- * @param descending - Wether to swap start & endkey for reverse reverse search
- * @returns allDocs's options to fetch all documents which keys start with prefix
- */
-function byPrefix(prefix: string, descending = false) {
-  const start = prefix;
-  const end = prefix + '\ufff0';
-  return !descending
-    ? { startkey: start, endkey: end }
-    : { startkey: end, endkey: start, descending };
-}
-
-/**
  * @returns Default adapter PouchDB option
  */
 export async function getDefaultPouchAdapter(): Promise<string> {
@@ -40,6 +27,19 @@ export async function getDefaultPouchAdapter(): Promise<string> {
     defaultPouchAdapter = 'leveldb';
   }
   return defaultPouchAdapter;
+}
+
+/**
+ * @param prefix - Prefix to query for
+ * @param descending - Wether to swap start & endkey for reverse reverse search
+ * @returns allDocs's options to fetch all documents which keys start with prefix
+ */
+export function byPrefix(prefix: string, descending = false) {
+  const start = prefix;
+  const end = prefix + '\ufff0';
+  return !descending
+    ? { startkey: start, endkey: end }
+    : { startkey: end, endkey: start, descending };
 }
 
 const statePrefix = 'state.';

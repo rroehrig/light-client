@@ -7,7 +7,7 @@ import { Processed } from '../../messages/types';
 import { getBalanceProofFromEnvelopeMessage, isMessageReceivedOfType } from '../../messages/utils';
 import { RaidenState } from '../../state';
 import { RaidenEpicDeps } from '../../types';
-import { Signed, isntNil } from '../../utils/types';
+import { Signed } from '../../utils/types';
 import { isActionOf } from '../../utils/actions';
 import { get$ } from '../../db/utils';
 import {
@@ -98,7 +98,6 @@ export const transferProcessedSendEpic = (
     filter((action) => action.meta.direction === Direction.RECEIVED),
     mergeMap((action) =>
       get$(db.transfers, transferKey(action.meta)).pipe(
-        filter(isntNil),
         map((doc) =>
           messageSend.request(
             { message: action.payload.message },

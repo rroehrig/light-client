@@ -60,4 +60,5 @@ export interface RaidenDatabase {
   state: Loki.Collection<StateMember>;
   channels: Loki.Collection<Channel>;
   transfers: Loki.Collection<TransferState>;
+  storageKeys: Set<string>;
 }
