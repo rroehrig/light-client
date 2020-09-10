@@ -203,7 +203,7 @@ function sendTransferSigned(
   return combineLatest([state$, deps.config$]).pipe(
     first(),
     mergeMap(([state, config]) => {
-      if (deps.db.transfersKeys.has(transferKey(action.meta))) {
+      if (deps.db.storageKeys.has(transferKey(action.meta))) {
         // don't throw to avoid emitting transfer.failure, to just wait for already pending transfer
         deps.log.warn('transfer already present', action.meta);
         return EMPTY;
@@ -224,6 +224,7 @@ function sendTransferSigned(
  * @param deps - Epics dependencies
  * @param deps.signer - The signer that will sign the message
  * @param deps.log - Logger instance
+ * @param deps.db - Database instance
  * @returns Observable of {@link transferUnlock.success} action.
  */
 function makeAndSignUnlock$(
@@ -231,7 +232,7 @@ function makeAndSignUnlock$(
   state: RaidenState,
   action: transferUnlock.request,
   doc: TransferState,
-  { log, signer }: { signer: RaidenEpicDeps['signer']; log: RaidenEpicDeps['log'] },
+  { log, signer, db }: Pick<RaidenEpicDeps, 'log' | 'signer' | 'db'>,
 ): Observable<transferUnlock.success> {
   const secrethash = action.meta.secrethash;
   const locked = doc.transfer;
@@ -251,7 +252,7 @@ function makeAndSignUnlock$(
     );
     // don't forget to check after signature too, may have expired by then
     // allow unlocking past expiration if secret registered on-chain
-    assert(doc.secretRegistered || locked.lock.expiration.gt(state.blockNumber), 'lock expired');
+    assert(doc.secretRegistered || doc.expiration > state.blockNumber, 'lock expired');
 
     const message: Unlock = {
       type: MessageType.UNLOCK,
@@ -274,9 +275,11 @@ function makeAndSignUnlock$(
   return signed$.pipe(
     withLatestFrom(state$),
     map(([signed, state]) => {
+      const doc = db.transfers.by('_id', transferKey(action.meta))!;
       const channel = getOpenChannel(state, { tokenNetwork, partner });
       assert(
-        locked.lock.expiration.gt(state.blockNumber) ||
+        doc.expiration > state.blockNumber ||
+          doc.secretRegistered ||
           channel.own.locks.find((lock) => lock.secrethash === secrethash && lock.registered),
         'lock expired',
       );
@@ -309,7 +312,9 @@ function sendTransferUnlocked(
 ): Observable<transferUnlock.success | transferUnlock.failure> {
   return combineLatest([state$, get$(db.transfers, transferKey(action.meta))]).pipe(
     first(([, doc]) => !!doc.secret), // wait for the secret to be persisted
-    mergeMap(([state, doc]) => makeAndSignUnlock$(state$, state, action, doc, { log, signer })),
+    mergeMap(([state, doc]) =>
+      makeAndSignUnlock$(state$, state, action, doc, { log, signer, db }),
+    ),
     catchError((err) => {
       log.warn('Error trying to unlock after SecretReveal', err);
       return of(transferUnlock.failure(err, action.meta));
@@ -418,7 +423,7 @@ function receiveTransferSigned(
     first(),
     mergeMap(([state, { revealTimeout, caps }]) => {
       const transfer: Signed<LockedTransfer> = action.payload.message;
-      if (db.transfersKeys.has(transferKey(meta))) {
+      if (db.storageKeys.has(transferKey(meta))) {
         log.warn('transfer already present', meta);
         const msgId = transfer.message_identifier;
         const doc = db.transfers.by('_id', transferKey(meta));
