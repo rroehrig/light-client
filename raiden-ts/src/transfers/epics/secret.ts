@@ -217,8 +217,7 @@ export const transferSecretRevealedEpic = (
       const secrethash = getSecrethash(action.payload.message.secret);
       const results = db.transfers.find({ secrethash });
       const message = action.payload.message;
-      const sent = results.find((doc) => doc.direction === Direction.SENT);
-      if (sent) {
+      for (const sent of results.filter((doc) => doc.direction === Direction.SENT)) {
         const meta = { secrethash, direction: Direction.SENT };
         // if secrethash matches, we're good for persisting, don't care for sender/signature
         yield transferSecret({ secret: message.secret }, meta);
@@ -226,11 +225,8 @@ export const transferSecretRevealedEpic = (
         // but are stricter for unlocking to next hop only
         if (
           action.meta.address === sent.partner &&
-          // don't unlock if channel closed
-          !sent.channelClosed &&
-          // don't unlock again if already unlocked, retry handled by transferRetryMessageEpic
-          // in the future, we may avoid retry until Processed, and [re]send once per SecretReveal
-          !sent.unlock
+          // don't unlock if channel closed: balanceProofs already registered on-chain
+          !sent.channelClosed
           // accepts secretReveal/unlock request even if registered on-chain
         ) {
           // request unlock to be composed, signed & sent to partner
@@ -238,9 +234,8 @@ export const transferSecretRevealedEpic = (
         }
       }
 
-      const received = results.find((doc) => doc.direction === Direction.RECEIVED);
       // we're mediator or target, and received reveal from next hop or initiator, respectively
-      if (received) {
+      for (const _received of results.filter((doc) => doc.direction === Direction.RECEIVED)) {
         // if secrethash matches, we're good for persisting, which also triggers Reveal back
         yield transferSecret(
           { secret: message.secret },
