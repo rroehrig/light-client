@@ -532,7 +532,9 @@ function receiveTransferUnlocked(
   return state$.pipe(
     first(),
     mergeMap((state) => {
-      const doc = db.transfers.by('_id', transferKey(meta))!;
+      const doc = db.transfers.by('_id', transferKey(meta));
+      assert(doc, 'unknown transfer');
+
       const unlock: Signed<Unlock> = action.payload.message;
       const partner = action.meta.address;
       assert(partner === doc.partner, 'wrong partner');
@@ -604,7 +606,9 @@ function receiveTransferExpired(
   return combineLatest([state$, config$]).pipe(
     first(),
     mergeMap(([state, { confirmationBlocks }]) => {
-      const doc = db.transfers.by('_id', transferKey(meta))!;
+      const doc = db.transfers.by('_id', transferKey(meta));
+      assert(doc, 'unknown transfer');
+
       const expired: Signed<LockExpired> = action.payload.message;
       const partner = action.meta.address;
       assert(partner === doc.partner, 'wrong partner');

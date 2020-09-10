@@ -264,6 +264,7 @@ export const transferRequestUnlockEpic = (
   action$.pipe(
     filter(isActionOf([transferSecret, transferSecretRegister.success])),
     filter((action) => action.meta.direction === Direction.RECEIVED),
+    filter((action) => transferSecret.is(action) || !!action.payload.confirmed),
     concatMap((action) =>
       get$(db.transfers, transferKey(action.meta)).pipe(
         first(),
