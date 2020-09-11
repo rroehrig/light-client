@@ -422,10 +422,10 @@ function receiveTransferSigned(
   return combineLatest([state$, config$]).pipe(
     first(),
     mergeMap(([state, { revealTimeout, caps }]) => {
-      const transfer: Signed<LockedTransfer> = action.payload.message;
+      const locked: Signed<LockedTransfer> = action.payload.message;
       if (db.storageKeys.has(transferKey(meta))) {
         log.warn('transfer already present', meta);
-        const msgId = transfer.message_identifier;
+        const msgId = locked.message_identifier;
         const doc = db.transfers.by('_id', transferKey(meta));
         // if transfer matches the stored one, re-send Processed once
         if (
@@ -440,37 +440,40 @@ function receiveTransferSigned(
       }
 
       // full balance proof validation
-      const tokenNetwork = transfer.token_network_address;
+      const tokenNetwork = locked.token_network_address;
       const partner = action.meta.address;
-      const channel = getOpenChannel(state, { tokenNetwork, partner }, transfer);
-      assert(transfer.nonce.eq(channel.partner.nextNonce), 'nonce mismatch');
+      const channel = getOpenChannel(state, { tokenNetwork, partner }, locked);
+      assert(locked.nonce.eq(channel.partner.nextNonce), [
+        'nonce mismatch',
+        { expected: channel.partner.nextNonce.toNumber(), received: locked.nonce.toNumber() },
+      ]);
 
-      const locks = [...channel.partner.locks, transfer.lock];
+      const locks = [...channel.partner.locks, locked.lock];
       const locksroot = getLocksroot(locks);
-      assert(transfer.locksroot === locksroot, 'locksroot mismatch');
+      assert(locked.locksroot === locksroot, 'locksroot mismatch');
       assert(
-        transfer.transferred_amount.eq(channel.partner.balanceProof.transferredAmount),
+        locked.transferred_amount.eq(channel.partner.balanceProof.transferredAmount),
         'transferredAmount mismatch',
       );
-      assert(transfer.locked_amount.eq(totalLocked(locks)), 'lockedAmount mismatch');
+      assert(locked.locked_amount.eq(totalLocked(locks)), 'lockedAmount mismatch');
 
       const { partnerCapacity } = channelAmounts(channel);
       assert(
-        transfer.lock.amount.lte(partnerCapacity),
+        locked.lock.amount.lte(partnerCapacity),
         'balanceProof total amount bigger than capacity',
       );
       // don't mind expiration, accept expired transfers to apply state change and stay in sync
       // with partner, so we can receive later LockExpired and transfers on top of it
 
-      assert(transfer.recipient === address, "Received transfer isn't for us");
+      assert(locked.recipient === address, "Received transfer isn't for us");
 
       log.info(
         'Receiving transfer of value',
-        transfer.lock.amount.toString(),
+        locked.lock.amount.toString(),
         'of token',
         channel.token,
         ', from',
-        transfer.initiator,
+        locked.initiator,
         ', through partner',
         partner,
       );
@@ -478,17 +481,17 @@ function receiveTransferSigned(
       let request$: Observable<Signed<SecretRequest> | undefined> = of(undefined);
       if (
         !caps?.[Capabilities.NO_RECEIVE] &&
-        transfer.target === address &&
+        locked.target === address &&
         // only request secret if transfer don't expire soon
-        transfer.lock.expiration.sub(revealTimeout).gt(state.blockNumber)
+        locked.lock.expiration.sub(revealTimeout).gt(state.blockNumber)
       )
         request$ = defer(() => {
           const request: SecretRequest = {
             type: MessageType.SECRET_REQUEST,
-            payment_identifier: transfer.payment_identifier,
+            payment_identifier: locked.payment_identifier,
             secrethash,
-            amount: transfer.lock.amount,
-            expiration: transfer.lock.expiration,
+            amount: locked.lock.amount,
+            expiration: locked.lock.expiration,
             message_identifier: makeMessageId(),
           };
           return signMessage(signer, request, { log });
@@ -497,7 +500,7 @@ function receiveTransferSigned(
       const processed$ = defer(() => {
         const processed: Processed = {
           type: MessageType.PROCESSED,
-          message_identifier: transfer.message_identifier,
+          message_identifier: locked.message_identifier,
         };
         return signMessage(signer, processed, { log });
       });
@@ -505,12 +508,12 @@ function receiveTransferSigned(
       // if any of these signature prompts fail, none of these actions will be emitted
       return combineLatest([processed$, request$]).pipe(
         mergeMap(function* ([processed, request]) {
-          yield transferSigned({ message: transfer, fee: Zero as Int<32>, partner }, meta);
+          yield transferSigned({ message: locked, fee: Zero as Int<32>, partner }, meta);
           // sets TransferState.transferProcessed
           yield transferProcessed({ message: processed }, meta);
           if (request) {
             // request initiator's presence, to be able to request secret
-            yield matrixPresence.request(undefined, { address: transfer.initiator });
+            yield matrixPresence.request(undefined, { address: locked.initiator });
             // request secret iff we're the target and receiving is enabled
             yield transferSecretRequest({ message: request }, meta);
           }
@@ -558,7 +561,10 @@ function receiveTransferUnlocked(
       // unlock validation
       const tokenNetwork = unlock.token_network_address;
       const channel = getOpenChannel(state, { tokenNetwork, partner }, unlock);
-      assert(unlock.nonce.eq(channel.partner.nextNonce), 'nonce mismatch');
+      assert(unlock.nonce.eq(channel.partner.nextNonce), [
+        'nonce mismatch',
+        { expected: channel.partner.nextNonce.toNumber(), received: unlock.nonce.toNumber() },
+      ]);
 
       const amount = locked.lock.amount;
       const locks = withoutLock(channel.partner, secrethash);
@@ -638,7 +644,10 @@ function receiveTransferExpired(
 
       const tokenNetwork = expired.token_network_address;
       const channel = getOpenChannel(state, { tokenNetwork, partner }, expired);
-      assert(expired.nonce.eq(channel.partner.nextNonce), 'nonce mismatch');
+      assert(expired.nonce.eq(channel.partner.nextNonce), [
+        'nonce mismatch',
+        { expected: channel.partner.nextNonce.toNumber(), received: expired.nonce.toNumber() },
+      ]);
 
       const locks = withoutLock(channel.partner, secrethash);
       assert(expired.locksroot === getLocksroot(locks), 'locksroot mismatch');
@@ -881,7 +890,10 @@ function receiveWithdrawRequest(
       if (persistedConfirmation) {
         confirmation$ = of(persistedConfirmation);
       } else {
-        assert(request.nonce.eq(channel.partner.nextNonce), 'nonce mismatch');
+        assert(request.nonce.eq(channel.partner.nextNonce), [
+          'nonce mismatch',
+          { expected: channel.partner.nextNonce.toNumber(), received: request.nonce.toNumber() },
+        ]);
         assert(
           request.total_withdraw.lte(channelAmounts(channel).partnerTotalWithdrawable),
           'invalid total_withdraw',
@@ -971,7 +983,10 @@ function receiveWithdrawExpired(
       const cached = cache.get(cacheKey);
       if (cached) processed$ = of(cached);
       else {
-        assert(expired.nonce.eq(channel.partner.nextNonce), 'nonce mismatch');
+        assert(expired.nonce.eq(channel.partner.nextNonce), [
+          'nonce mismatch',
+          { expected: channel.partner.nextNonce.toNumber(), received: expired.nonce.toNumber() },
+        ]);
         assert(
           state.blockNumber >= withdrawMeta.expiration + confirmationBlocks,
           'expire block not confirmed yet',
