@@ -31,7 +31,12 @@ import mainnetServicesDeploy from './deployment/deployment_services_mainnet.json
 import { UserDepositFactory } from './contracts/UserDepositFactory';
 import { MonitoringServiceFactory } from './contracts/MonitoringServiceFactory';
 import { TokenNetworkRegistryFactory } from './contracts/TokenNetworkRegistryFactory';
-import { RaidenDatabase, RaidenDatabaseOptions, TransferStateish } from './db/types';
+import {
+  RaidenDatabase,
+  RaidenDatabaseMeta,
+  RaidenDatabaseOptions,
+  TransferStateish,
+} from './db/types';
 import {
   getRaidenState,
   changes$,
@@ -422,6 +427,39 @@ export async function getUdcBalance(latest$: Observable<Latest>): Promise<UInt<3
     .toPromise();
 }
 
+function validateDump(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  dump: { _id: string; value: any }[],
+  {
+    address,
+    network,
+    contractsInfo,
+  }: Pick<RaidenEpicDeps, 'address' | 'network' | 'contractsInfo'>,
+) {
+  const meta = (dump[0] as unknown) as RaidenDatabaseMeta;
+  assert(meta?._id === '_meta', ErrorCodes.RDN_STATE_MIGRATION);
+  assert(meta.address === address, ErrorCodes.RDN_STATE_ADDRESS_MISMATCH);
+  assert(
+    meta.registry === contractsInfo.TokenNetworkRegistry.address,
+    ErrorCodes.RDN_STATE_NETWORK_MISMATCH,
+  );
+  assert(meta.network === network.chainId, ErrorCodes.RDN_STATE_NETWORK_MISMATCH);
+
+  assert(
+    dump.find((l) => l._id === 'state.address')?.value === address,
+    ErrorCodes.RDN_STATE_ADDRESS_MISMATCH,
+  );
+  assert(
+    dump.find((l) => l._id === 'state.chainId')?.value === network.chainId,
+    ErrorCodes.RDN_STATE_NETWORK_MISMATCH,
+  );
+  assert(
+    dump.find((l) => l._id === 'state.registry')?.value ===
+      contractsInfo.TokenNetworkRegistry.address,
+    ErrorCodes.RDN_STATE_NETWORK_MISMATCH,
+  );
+}
+
 /**
  * Loads state from `storageOrState`. Returns the initial [[RaidenState]] if
  * `storageOrState` does not exist.
@@ -471,7 +509,12 @@ export async function getState(
   if (dump) {
     if (typeof dump === 'string') dump = jsonParse(dump);
     if (!Array.isArray(dump)) dump = Array.from(legacyStateMigration(dump));
+
+    // perform some early simple validation on dump before persisting it in database
+    validateDump(dump, { address, network, contractsInfo });
+
     db = await replaceDatabase.call(dbCtor, dump, dbName);
+    // only if succeeds:
     if (fromLocalStorage) storage?.storage!.removeItem(dbName);
   } else {
     db = await migrateDatabase.call(dbCtor, dbName);

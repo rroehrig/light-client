@@ -20,7 +20,7 @@ PouchDB.plugin(PouchDBFind);
 
 import Loki from 'lokijs';
 
-import { assert } from '../utils';
+import { ErrorCodes, assert } from '../utils/error';
 import { RaidenState } from '../state';
 import { Channel } from '../channels';
 import { channelKey, channelUniqueKey } from '../channels/utils';
@@ -383,6 +383,7 @@ export async function replaceDatabase(
   migrations: Migrations = defaultMigrations,
   cleanOld = false,
 ): ReturnType<typeof migrateDatabase> {
+  const { log } = this.__defaults;
   const iter = isAsyncIterable(data) ? data[Symbol.asyncIterator]() : data[Symbol.iterator]();
   const first = await iter.next();
   assert(!first.done && first.value._id === '_meta', 'first yielded value must be "_meta"');
@@ -396,14 +397,29 @@ export async function replaceDatabase(
     const dbMeta = await databaseMeta(storage);
     assert(
       meta.version >= version && meta.blockNumber > dbMeta.blockNumber,
-      'Trying to replace existing database with an older version',
+      ErrorCodes.RDN_STATE_MIGRATION,
     );
     // shouldn't happen, since [name] is generated from these parameters
     assert(
-      meta.address === dbMeta.address &&
-        meta.registry === dbMeta.registry &&
-        meta.network === dbMeta.network,
-      'Incompatible meta values',
+      meta.address === dbMeta.address,
+      [
+        ErrorCodes.RDN_STATE_ADDRESS_MISMATCH,
+        { expected: dbMeta.address, received: meta.address },
+      ],
+      log?.error,
+    );
+    assert(
+      meta.registry === dbMeta.registry && meta.network === dbMeta.network,
+      [
+        ErrorCodes.RDN_STATE_NETWORK_MISMATCH,
+        {
+          expectedRegistry: dbMeta.registry,
+          receivedRegistry: meta.registry,
+          expectedNetwork: dbMeta.network,
+          receivedNetwork: meta.network,
+        },
+      ],
+      log?.error,
     );
     // drop versions which would make migration fail
     await storage.destroy();
