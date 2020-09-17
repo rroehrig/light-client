@@ -12,13 +12,13 @@ import {
 } from './mocks';
 
 import { Subject } from 'rxjs';
-import { first, scan } from 'rxjs/operators';
+import { exhaustMap, first, pluck, scan } from 'rxjs/operators';
 import { Wallet } from 'ethers';
 import { AddressZero, Zero, HashZero } from 'ethers/constants';
 import { bigNumberify, defaultAbiCoder } from 'ethers/utils';
 import { Filter } from 'ethers/providers';
 
-import { Address, Hash, Int, UInt, decode, Secret } from 'raiden-ts/utils/types';
+import { Address, Hash, Int, UInt, Secret } from 'raiden-ts/utils/types';
 import { Processed, MessageType } from 'raiden-ts/messages/types';
 import {
   makeMessageId,
@@ -26,6 +26,7 @@ import {
   makeSecret,
   getSecrethash,
   transferKey,
+  getTransfer,
 } from 'raiden-ts/transfers/utils';
 import { IOU } from 'raiden-ts/services/types';
 import { RaidenState } from 'raiden-ts/state';
@@ -40,7 +41,6 @@ import { Direction, TransferState } from 'raiden-ts/transfers/state';
 import { transfer, transferSecret, transferUnlock } from 'raiden-ts/transfers/actions';
 import { TokenNetwork } from 'raiden-ts/contracts/TokenNetwork';
 import { assert } from 'raiden-ts/utils';
-import { get$ } from 'raiden-ts/db/utils';
 
 /**
  * Composes several constants used across epics
@@ -187,19 +187,28 @@ export function getChannel(
  * @param wait - Whether to wait for the transfer to be in state, or throw if it isn't
  * @returns Promise to TransferState
  */
-export async function getTransfer(
+export async function getOrWaitTransfer(
   raiden: MockedRaiden,
   key: { direction: Direction; secrethash: Hash } | string,
   wait: boolean | ((doc: TransferState) => boolean) = false,
 ): Promise<TransferState> {
   if (typeof key !== 'string') key = transferKey(key);
-  let doc;
-  if (wait)
-    doc = await get$(raiden.deps.db.transfers, key)
-      .pipe(wait !== true ? first(wait) : first())
-      .toPromise();
-  else doc = raiden.deps.db.transfers.by('_id', key);
-  return decode(TransferState, doc);
+  return await raiden.deps.latest$
+    .pipe(
+      pluck('state'),
+      exhaustMap((state) => getTransfer(state, raiden.deps.db, key).catch(() => undefined)),
+      first((transfer): transfer is NonNullable<typeof transfer> => {
+        if (!wait) {
+          if (transfer) return true;
+          else throw new Error('transfer not found');
+        } else if (wait === true) return !!transfer;
+        else {
+          if (transfer) return wait(transfer);
+          else return false;
+        }
+      }),
+    )
+    .toPromise();
 }
 
 /**
@@ -393,14 +402,14 @@ export async function ensureTransferPending(
 ): Promise<TransferState> {
   await ensureChannelIsDeposited([raiden, partner], value); // from partner to raiden
   try {
-    return await getTransfer(
+    return await getOrWaitTransfer(
       raiden,
       transferKey({ direction: Direction.SENT, secrethash: secrethash_ }),
     );
   } catch (e) {}
 
   const paymentId = makePaymentId();
-  const sentPromise = getTransfer(
+  const sentPromise = getOrWaitTransfer(
     raiden,
     transferKey({ direction: Direction.SENT, secrethash: secrethash_ }),
     true,
@@ -419,7 +428,7 @@ export async function ensureTransferPending(
   );
   const sent = await sentPromise;
 
-  await getTransfer(
+  await getOrWaitTransfer(
     partner,
     transferKey({ direction: Direction.RECEIVED, secrethash: secrethash_ }),
     true,
@@ -447,13 +456,20 @@ export async function ensureTransferUnlocked(
   await ensureTransferPending([raiden, partner], value, { secrethash }); // from partner to raiden
   try {
     if (
-      (await getTransfer(partner, transferKey({ direction: Direction.RECEIVED, secrethash })))
-        .unlock
+      (
+        await getOrWaitTransfer(
+          partner,
+          transferKey({ direction: Direction.RECEIVED, secrethash }),
+        )
+      ).unlock
     )
-      return await getTransfer(raiden, transferKey({ direction: Direction.SENT, secrethash }));
+      return await getOrWaitTransfer(
+        raiden,
+        transferKey({ direction: Direction.SENT, secrethash }),
+      );
   } catch (e) {}
 
-  const sentPromise = getTransfer(
+  const sentPromise = getOrWaitTransfer(
     raiden,
     transferKey({ direction: Direction.SENT, secrethash }),
     (doc) => !!doc.unlockProcessed,
@@ -466,7 +482,7 @@ export async function ensureTransferUnlocked(
   );
   await sentPromise;
 
-  await getTransfer(
+  await getOrWaitTransfer(
     partner,
     transferKey({ direction: Direction.RECEIVED, secrethash }),
     (doc) => !!doc.unlockProcessed,

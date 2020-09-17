@@ -30,7 +30,7 @@ import {
   secret,
   ensureChannelIsSettled,
   getChannel,
-  getTransfer,
+  getOrWaitTransfer,
   amount,
   getChannelEventsFilter,
 } from '../fixtures';
@@ -763,7 +763,7 @@ describe('channelSettleEpic', () => {
 
     // LockedTransfer message we sent, not one before latest BP
     const locked = (
-      await getTransfer(partner, transferKey({ direction: Direction.RECEIVED, secrethash }))
+      await getOrWaitTransfer(partner, { direction: Direction.RECEIVED, secrethash })
     ).transfer;
     // ensure our latest own BP is the unlocked one, the one after Locked
     expect(getChannel(raiden, partner).own.balanceProof.nonce).toEqual(locked.nonce.add(1));
@@ -838,7 +838,7 @@ describe('channelSettleEpic', () => {
 
     // LockedTransfer message we received, not one before latest BP
     const locked = (
-      await getTransfer(raiden, transferKey({ direction: Direction.RECEIVED, secrethash }))
+      await getOrWaitTransfer(raiden, transferKey({ direction: Direction.RECEIVED, secrethash }))
     ).transfer;
     // ensure our latest partner BP is the unlocked one, the one after Locked
     expect(getChannel(raiden, partner).partner.balanceProof.nonce).toEqual(locked.nonce.add(1));

@@ -30,7 +30,6 @@ import {
 import { Contract, EventFilter, ContractTransaction } from 'ethers/contract';
 import { Wallet } from 'ethers/wallet';
 import PouchDB from 'pouchdb';
-import Loki from 'lokijs';
 
 jest.mock('raiden-ts/messages/utils', () => ({
   ...jest.requireActual<any>('raiden-ts/messages/utils'),
@@ -70,18 +69,15 @@ import { ShutdownReason, Capabilities } from 'raiden-ts/constants';
 import { createEpicMiddleware } from 'redux-observable';
 import { raidenRootEpic } from 'raiden-ts/epics';
 import { migrateDatabase, putRaidenState, getRaidenState } from 'raiden-ts/db/utils';
-import { RaidenStorageConstructor, StateMember } from 'raiden-ts/db/types';
+import { RaidenDatabaseConstructor } from 'raiden-ts/db/types';
 import { getNetworkName } from 'raiden-ts/utils/ethers';
 import { createPersisterMiddleware } from 'raiden-ts/persister';
-import { LokiRaidenAdapter } from 'raiden-ts/db/adapter';
-import { Channel } from 'raiden-ts/channels/state';
-import { TransferState } from 'raiden-ts/transfers/state';
 
 logging.setLevel(logging.levels.DEBUG);
 const RaidenPouchDB = PouchDB.defaults({
   adapter: 'memory',
   log: logging,
-} as any) as RaidenStorageConstructor;
+} as any) as RaidenDatabaseConstructor;
 
 export type MockedTransaction = ContractTransaction & {
   wait: jest.MockedFunction<ContractTransaction['wait']>;
@@ -310,7 +306,7 @@ const mockedCleanups: (() => void)[] = [];
 afterEach(async () => {
   let clean;
   while ((clean = mockedCleanups.pop())) clean();
-  await sleep(pollingInterval);
+  await sleep(10 * pollingInterval);
   await flushPromises();
 });
 
@@ -579,24 +575,8 @@ export function raidenEpicDeps(): MockRaidenEpicDeps {
     contractsInfo.TokenNetworkRegistry.address,
     address,
   ].join('_');
-  const storage = new RaidenPouchDB(dbName);
-  const db = new Loki(storage.name, {
-    adapter: new LokiRaidenAdapter(storage),
-  });
-  const dbState = db.getCollection<StateMember>('state');
-  const dbChannels = db.getCollection<Channel>('channels');
-  const dbTransfers = db.getCollection<TransferState>('transfers');
-  db.collections.forEach((coll) => {
-    let dirty = false;
-    Object.defineProperty(coll, 'dirty', {
-      get: () => dirty,
-      set: (v: boolean) => {
-        dirty = v;
-        if (v) db.saveDatabase();
-      },
-    });
-  });
-  const storageKeys = new Set<string>();
+  const db = new RaidenPouchDB(dbName);
+  Object.assign(db, { storageKeys: new Set<string>() });
 
   return {
     latest$,
@@ -616,7 +596,7 @@ export function raidenEpicDeps(): MockRaidenEpicDeps {
     userDepositContract,
     secretRegistryContract,
     monitoringServiceContract,
-    db: { storage, db, state: dbState, channels: dbChannels, transfers: dbTransfers, storageKeys },
+    db,
   };
 }
 
@@ -1102,14 +1082,14 @@ export async function makeRaiden(
 
   if (!initialState)
     try {
-      initialState = decode(RaidenState, getRaidenState(db));
+      initialState = decode(RaidenState, await getRaidenState(db));
     } catch (e) {}
   if (!initialState) {
     initialState = makeInitialState(
       { network, address, contractsInfo },
       { blockNumber: provider.blockNumber },
     );
-    putRaidenState(db, initialState);
+    await putRaidenState(db, initialState);
   }
 
   const deps = {

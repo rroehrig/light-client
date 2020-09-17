@@ -32,11 +32,14 @@ test('migrate and decode', async () => {
     if (!Array.isArray(dump)) dump = Array.from(legacyStateMigration(dump));
     const db = await replaceDatabase.call(dbCtor, dump, dbName);
 
-    const decodedState = decode(RaidenState, getRaidenState(db));
+    const decodedState = decode(RaidenState, await getRaidenState(db));
     expect(RaidenState.is(decodedState)).toBe(true);
 
-    for (const transfer of db.transfers.find()) {
-      const decodedTransfer = decode(TransferState, transfer);
+    const results = await db.find({
+      selector: { cleared: { $exists: true }, direction: { $exists: true } },
+    });
+    for (const doc of results.docs) {
+      const decodedTransfer = decode(TransferState, doc);
       expect(TransferState.is(decodedTransfer)).toBe(true);
     }
   }

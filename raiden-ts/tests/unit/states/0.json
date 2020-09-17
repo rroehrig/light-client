@@ -174,6 +174,7 @@
         "secrethash": "0xcba277c0878f4c391518c43043ef123a9d3dec388684fedbe1c3670573407b99",
         "direction": "received",
         "expiration": 3361215,
+        "cleared": 0,
         "transfer": {
             "type": "LockedTransfer",
             "message_identifier": {
@@ -309,6 +310,7 @@
         "secrethash": "0xd3460e3ae468c6cb7e533c691b9a855bea5400bebc7c26bcaa028b0ecc1666a1",
         "direction": "sent",
         "expiration": 3361220,
+        "cleared": 0,
         "transfer": {
             "type": "LockedTransfer",
             "message_identifier": {

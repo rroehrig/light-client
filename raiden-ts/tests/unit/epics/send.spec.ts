@@ -16,7 +16,7 @@ import {
   getChannel,
   secret,
   secrethash,
-  getTransfer,
+  getOrWaitTransfer,
   expectChannelsAreInSync,
 } from '../fixtures';
 
@@ -103,7 +103,7 @@ describe('send transfer', () => {
     expect(raiden.output.filter(transferSigned.is)).toHaveLength(1);
 
     expect(raiden.output).toContainEqual(transferSecret({ secret }, meta));
-    await expect(getTransfer(raiden, transferKey(meta))).resolves.toMatchObject({
+    await expect(getOrWaitTransfer(raiden, transferKey(meta))).resolves.toMatchObject({
       transfer: expectedLockedTransfer,
       fee,
       partner: partner.address,
@@ -189,7 +189,7 @@ describe('send transfer', () => {
         ),
       );
 
-      const finalState = await getTransfer(raiden, meta, (doc) => !!doc.unlockProcessed);
+      const finalState = await getOrWaitTransfer(raiden, meta, (doc) => !!doc.unlockProcessed);
       expect(finalState).toMatchObject({
         unlock: expectedUnlock,
         unlockProcessed: expect.anything(),
@@ -303,7 +303,7 @@ describe('send transfer', () => {
         ),
       );
 
-      const finalState = await getTransfer(raiden, meta, (doc) => !!doc.expiredProcessed);
+      const finalState = await getOrWaitTransfer(raiden, meta, (doc) => !!doc.expiredProcessed);
       expect(finalState).toMatchObject(
         expect.objectContaining({
           expired: expectedExpired,
@@ -325,7 +325,7 @@ describe('send transfer', () => {
         ),
       );
       // ensure it reused the previous cached expired message
-      expect((await promise).payload.message).toBe(finalState.expired);
+      expect((await promise).payload.message).toEqual(finalState.expired);
 
       expectChannelsAreInSync([raiden, partner]);
     });
@@ -411,7 +411,7 @@ describe('send transfer', () => {
 
 describe('transferRetryMessageEpic', () => {
   async function pendingTransfer([raiden, partner]: [MockedRaiden, MockedRaiden]) {
-    const signedPromise = getTransfer(raiden, meta, true);
+    const signedPromise = getOrWaitTransfer(raiden, meta, true);
     raiden.store.dispatch(
       transfer.request(
         {
@@ -662,12 +662,13 @@ describe('monitorSecretRegistryEpic', () => {
         data: secret, // non-indexed secret
       }),
     );
+    await waitBlock(txBlock + 1);
     await waitBlock(txBlock + raiden.config.confirmationBlocks + 1);
 
     expect(raiden.output).toContainEqual(
       transferSecretRegister.success({ secret, txHash, txBlock, confirmed: true }, meta),
     );
-    await expect(getTransfer(raiden, meta)).resolves.toMatchObject({
+    await expect(getOrWaitTransfer(raiden, meta)).resolves.toMatchObject({
       secret,
       secretRegistered: { txBlock, txHash, ts: expect.any(Number) },
     });

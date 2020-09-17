@@ -6,17 +6,19 @@ import {
   providersEmit,
   makeHash,
   makeRaiden,
+  flushPromises,
 } from '../mocks';
 import {
   ensureChannelIsDeposited,
   tokenNetwork,
   secrethash,
   secret,
-  getTransfer,
+  getOrWaitTransfer,
   expectChannelsAreInSync,
   ensureTransferPending,
 } from '../fixtures';
 
+import { first, pluck } from 'rxjs/operators';
 import { bigNumberify } from 'ethers/utils';
 import { Zero, One } from 'ethers/constants';
 
@@ -62,8 +64,12 @@ describe('receive transfers', () => {
       const [raiden, partner] = await makeRaidens(2);
       await ensureChannelIsDeposited([partner, raiden]);
 
-      const sentState = getTransfer(partner, sentMeta, (doc) => !!doc.transferProcessed);
-      const receivedState = getTransfer(raiden, receivedMeta, (doc) => !!doc.transferProcessed);
+      const sentState = getOrWaitTransfer(partner, sentMeta, (doc) => !!doc.transferProcessed);
+      const receivedState = getOrWaitTransfer(
+        raiden,
+        receivedMeta,
+        (doc) => !!doc.transferProcessed,
+      );
 
       const blockNumber = raiden.deps.provider.blockNumber;
       partner.store.dispatch(
@@ -157,7 +163,7 @@ describe('receive transfers', () => {
       // stopping mocked MatrixClient prevents messages from being forwarded
       (await partner.deps.matrix$.toPromise()).stopClient();
 
-      const sentState = getTransfer(partner, sentMeta, true);
+      const sentState = getOrWaitTransfer(partner, sentMeta, true);
       partner.store.dispatch(
         transfer.request(
           {
@@ -203,7 +209,11 @@ describe('receive transfers', () => {
       const [raiden, partner] = await makeRaidens(2);
       const sentState = await ensureTransferPending([partner, raiden], value);
 
-      const receivedState = getTransfer(raiden, receivedMeta, (doc) => !!doc.unlockProcessed);
+      const receivedState = getOrWaitTransfer(
+        raiden,
+        receivedMeta,
+        (doc) => !!doc.unlockProcessed,
+      );
       // "reveal" secret directly to target, so it unlocks back to initiator
       raiden.store.dispatch(transferSecret({ secret }, receivedMeta));
 
@@ -247,7 +257,7 @@ describe('receive transfers', () => {
 
       (await partner.deps.matrix$.toPromise()).stopClient();
 
-      const sentStatePromise = getTransfer(partner, sentMeta, (doc) => !!doc.unlock);
+      const sentStatePromise = getOrWaitTransfer(partner, sentMeta, (doc) => !!doc.unlock);
       partner.store.dispatch(transferSecret({ secret }, sentMeta));
       partner.store.dispatch(transferUnlock.request(undefined, sentMeta));
       const sentState = await sentStatePromise;
@@ -256,6 +266,9 @@ describe('receive transfers', () => {
       // "wrong" secret/secrethash
       const secret_ = makeSecret();
       const secrethash_ = getSecrethash(secret_);
+      const promise = raiden.deps.latest$
+        .pipe(pluck('action'), first(transferUnlock.failure.is))
+        .toPromise();
       raiden.store.dispatch(
         messageReceived(
           {
@@ -266,16 +279,11 @@ describe('receive transfers', () => {
           { address: partner.address },
         ),
       );
-
-      await sleep();
+      await expect(promise).resolves.toEqual(
+        transferUnlock.failure(expect.any(Error), { secrethash: secrethash_, direction }),
+      );
       expect(raiden.output).not.toContainEqual(
         transferUnlock.success(expect.anything(), expect.anything()),
-      );
-      expect(raiden.output).toContainEqual(
-        transferUnlock.failure(
-          expect.objectContaining({ message: expect.stringContaining('unknown transfer') }),
-          { secrethash: secrethash_, direction },
-        ),
       );
     });
 
@@ -287,7 +295,7 @@ describe('receive transfers', () => {
 
       (await partner.deps.matrix$.toPromise()).stopClient();
 
-      const sentStatePromise = getTransfer(partner, sentMeta, (doc) => !!doc.unlock);
+      const sentStatePromise = getOrWaitTransfer(partner, sentMeta, (doc) => !!doc.unlock);
       partner.store.dispatch(transferSecret({ secret }, sentMeta));
       partner.store.dispatch(transferUnlock.request(undefined, sentMeta));
       const sentState = await sentStatePromise;
@@ -325,7 +333,11 @@ describe('receive transfers', () => {
       const [raiden, partner] = await makeRaidens(2);
       const sentState = await ensureTransferPending([partner, raiden], value);
 
-      const receivedState = getTransfer(raiden, receivedMeta, (doc) => !!doc.expiredProcessed);
+      const receivedState = getOrWaitTransfer(
+        raiden,
+        receivedMeta,
+        (doc) => !!doc.expiredProcessed,
+      );
 
       // advance blocks to trigger auto-expiration on partner
       await waitBlock(sentState.expiration + 2 * partner.config.confirmationBlocks + 1);
@@ -370,7 +382,7 @@ describe('receive transfers', () => {
 
       (await partner.deps.matrix$.toPromise()).stopClient();
 
-      const sentStatePromise = getTransfer(partner, sentMeta, (doc) => !!doc.expired);
+      const sentStatePromise = getOrWaitTransfer(partner, sentMeta, (doc) => !!doc.expired);
       await waitBlock(pendingSentState.expiration + 2 * partner.config.confirmationBlocks + 1);
       const sentState = await sentStatePromise;
       const expired = untime(sentState.expired!);
@@ -378,6 +390,9 @@ describe('receive transfers', () => {
       // "wrong" secret/secrethash
       const secret_ = makeSecret();
       const secrethash_ = getSecrethash(secret_);
+      const promise = raiden.deps.latest$
+        .pipe(pluck('action'), first(transferExpire.failure.is))
+        .toPromise();
       raiden.store.dispatch(
         messageReceived(
           {
@@ -389,15 +404,11 @@ describe('receive transfers', () => {
         ),
       );
 
-      await sleep();
+      await expect(promise).resolves.toEqual(
+        transferExpire.failure(expect.any(Error), { secrethash: secrethash_, direction }),
+      );
       expect(raiden.output).not.toContainEqual(
         transferExpire.success(expect.anything(), expect.anything()),
-      );
-      expect(raiden.output).toContainEqual(
-        transferExpire.failure(
-          expect.objectContaining({ message: expect.stringContaining('unknown transfer') }),
-          { secrethash: secrethash_, direction },
-        ),
       );
     });
 
@@ -409,7 +420,7 @@ describe('receive transfers', () => {
 
       (await partner.deps.matrix$.toPromise()).stopClient();
 
-      const sentStatePromise = getTransfer(partner, sentMeta, (doc) => !!doc.expired);
+      const sentStatePromise = getOrWaitTransfer(partner, sentMeta, (doc) => !!doc.expired);
       await waitBlock(pendingSentState.expiration + 2 * partner.config.confirmationBlocks + 1);
       const sentState = await sentStatePromise;
       const expired = untime(sentState.expired!);
@@ -446,8 +457,8 @@ describe('receive transfers', () => {
     const { secretRegistryContract } = raiden.deps;
     const pendingSentState = await ensureTransferPending([partner, raiden]);
 
-    const sentState = getTransfer(partner, sentMeta, (doc) => !!doc.unlockProcessed);
-    const receivedState = getTransfer(raiden, receivedMeta, (doc) => !!doc.unlockProcessed);
+    const sentState = getOrWaitTransfer(partner, sentMeta, (doc) => !!doc.unlockProcessed);
+    const receivedState = getOrWaitTransfer(raiden, receivedMeta, (doc) => !!doc.unlockProcessed);
 
     const txHash = makeHash();
     await waitBlock(pendingSentState.expiration);
@@ -494,7 +505,7 @@ describe('receive transfers', () => {
     // "reveal" secret directly to target
     raiden.store.dispatch(transferSecret({ secret }, receivedMeta));
 
-    const receivedState = getTransfer(raiden, receivedMeta, (doc) => !!doc.secretRegistered);
+    const receivedState = getOrWaitTransfer(raiden, receivedMeta, (doc) => !!doc.secretRegistered);
 
     // advance to some block before start of the danger zone, secret not yet registered
     await waitBlock(sentState.expiration - raiden.config.revealTimeout - 1);
@@ -574,7 +585,8 @@ test('initQueuePendingReceivedEpic', async () => {
   const sentState = await ensureTransferPending([partner, raiden]);
 
   raiden.stop();
-  await sleep();
+  await flushPromises();
+  await sleep(raiden.config.httpTimeout);
   // re-init client: requires memory pouchDB to persist across instances on same wallet (dbName)
   raiden = await makeRaiden(raiden.deps.signer);
 
