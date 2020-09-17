@@ -27,64 +27,72 @@ export const DirectionC = t.keyof(invert(Direction) as { [D in Direction]: strin
  */
 const _TransferState = t.readonly(
   t.intersection([
-    t.type({
-      _id: t.string, // transferKey
-      channel: t.string, // channelUniqueKey
-      direction: DirectionC,
-      secrethash: Hash,
-      expiration: t.number,
-      /** -> outgoing locked transfer */
-      transfer: Timed(Signed(LockedTransfer)),
-      fee: Int(32),
-      partner: Address,
-    }),
-    t.partial({
-      /** Transfer secret, if known */
-      secret: Secret,
-      /** Set iff secret got registered on-chain on a block before transfer expiration */
-      secretRegistered: Timed(t.type({ txHash: Hash, txBlock: t.number })),
-      /** <- incoming processed for locked transfer */
-      transferProcessed: Timed(Signed(Processed)),
-      /** !! channel was closed !!  */
-      channelClosed: Timed(t.type({ txHash: Hash, txBlock: t.number })),
-      /** channel was settled */
-      channelSettled: Timed(t.type({ txHash: Hash, txBlock: t.number })),
-      /**
-       * <- incoming secret request from target
-       * If this is set, it means the target requested the secret, not necessarily with a valid
-       * amount (an invalid amount < value == lock - fee, means transfer failed)
-       */
-      secretRequest: Timed(Signed(SecretRequest)),
-      /**
-       * -> outgoing secret reveal to target
-       * If this is set, it means the secret was revealed (so transfer succeeded, even if it didn't
-       * complete yet)
-       */
-      secretReveal: Timed(Signed(SecretReveal)),
-      /**
-       * -> outgoing unlock to recipient
-       * If this is set, it means the Unlock was sent (even if partner didn't acknowledge it yet)
-       */
-      unlock: Timed(Signed(Unlock)),
-      /**
-       * -> outgoing lock expired (if so)
-       * If this is set, transfer failed, and we expired the lock (retrieving the locked amount).
-       * Transfer failed may not have completed yet, e.g. waiting for LockExpired's Processed reply
-       */
-      expired: Timed(Signed(LockExpired)),
-      /**
-       * <- incoming processed for Unlock message
-       * If this is set, the protocol completed by the transfer succeeding and partner
-       * acknowledging validity of our off-chain unlock
-       */
-      unlockProcessed: Timed(Signed(Processed)),
-      /**
-       * <- incoming processed for LockExpired message
-       * If this is set, the protocol completed by the transfer failing and partner acknowledging
-       * this transfer can't be claimed anymore
-       */
-      expiredProcessed: Timed(Signed(Processed)),
-    }),
+    t.type(
+      {
+        _id: t.string, // transferKey
+        channel: t.string, // channelUniqueKey
+        direction: DirectionC,
+        secrethash: Hash,
+        expiration: t.number, // [number] version of [transfer.lock.expiration]
+        /** -> outgoing locked transfer */
+        transfer: Timed(Signed(LockedTransfer)),
+        fee: Int(32),
+        partner: Address,
+        /* timestamp of when transfer completed and may be cleared from state (non-cleared=0) */
+        cleared: t.number,
+      },
+      'TransferStateBase',
+    ),
+    t.partial(
+      {
+        /** Transfer secret, if known */
+        secret: Secret,
+        /** Set iff secret got registered on-chain on a block before transfer expiration */
+        secretRegistered: Timed(t.type({ txHash: Hash, txBlock: t.number })),
+        /** <- incoming processed for locked transfer */
+        transferProcessed: Timed(Signed(Processed)),
+        /** !! channel was closed !!  */
+        channelClosed: Timed(t.type({ txHash: Hash, txBlock: t.number })),
+        /** channel was settled */
+        channelSettled: Timed(t.type({ txHash: Hash, txBlock: t.number })),
+        /**
+         * <- incoming secret request from target
+         * If this is set, it means the target requested the secret, not necessarily with a valid
+         * amount (an invalid amount < value == lock - fee, means transfer failed)
+         */
+        secretRequest: Timed(Signed(SecretRequest)),
+        /**
+         * -> outgoing secret reveal to target
+         * If this is set, it means the secret was revealed (so transfer succeeded, even if it didn't
+         * complete yet)
+         */
+        secretReveal: Timed(Signed(SecretReveal)),
+        /**
+         * -> outgoing unlock to recipient
+         * If this is set, it means the Unlock was sent (even if partner didn't acknowledge it yet)
+         */
+        unlock: Timed(Signed(Unlock)),
+        /**
+         * -> outgoing lock expired (if so)
+         * If this is set, transfer failed, and we expired the lock (retrieving the locked amount).
+         * Transfer failed may not have completed yet, e.g. waiting for LockExpired's Processed reply
+         */
+        expired: Timed(Signed(LockExpired)),
+        /**
+         * <- incoming processed for Unlock message
+         * If this is set, the protocol completed by the transfer succeeding and partner
+         * acknowledging validity of our off-chain unlock
+         */
+        unlockProcessed: Timed(Signed(Processed)),
+        /**
+         * <- incoming processed for LockExpired message
+         * If this is set, the protocol completed by the transfer failing and partner acknowledging
+         * this transfer can't be claimed anymore
+         */
+        expiredProcessed: Timed(Signed(Processed)),
+      },
+      'TransferStateOpts',
+    ),
   ]),
 );
 export interface TransferState extends t.TypeOf<typeof _TransferState> {}

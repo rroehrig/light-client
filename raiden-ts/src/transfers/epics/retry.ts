@@ -8,7 +8,7 @@ import { RaidenState } from '../../state';
 import { RaidenEpicDeps } from '../../types';
 import { isActionOf } from '../../utils/actions';
 import { Address } from '../../utils/types';
-import { get$ } from '../../db/utils';
+import { pluckDistinct } from '../../utils/rx';
 import {
   transferExpire,
   transferSigned,
@@ -26,14 +26,13 @@ import { retrySendUntil$, exponentialBackoff } from './utils';
  * @param action$ - Observable of transferExpire.success actions
  * @param state$ - Observable of RaidenStates
  * @param deps - Epics dependencies
- * @param deps.db - Database instance
  * @param deps.config$ - Config observable
  * @returns Observable of messageSend.request actions
  */
 export const transferRetryMessageEpic = (
   action$: Observable<RaidenAction>,
   state$: Observable<RaidenState>,
-  { db, config$ }: RaidenEpicDeps,
+  { config$ }: RaidenEpicDeps,
 ): Observable<messageSend.request> => {
   return action$.pipe(
     filter(
@@ -45,10 +44,10 @@ export const transferRetryMessageEpic = (
         transferSecretReveal,
       ]),
     ),
-    withLatestFrom(config$),
-    mergeMap(([action, { pollingInterval, httpTimeout, revealTimeout }]) => {
-      const doc = db.transfers.by('_id', transferKey(action.meta));
-      const doc$ = get$(db.transfers, transferKey(action.meta));
+    withLatestFrom(state$, config$),
+    mergeMap(([action, state, { pollingInterval, httpTimeout, revealTimeout }]) => {
+      const transfer = state.transfers[transferKey(action.meta)];
+      const transfer$ = state$.pipe(pluckDistinct('transfers', transferKey(action.meta)));
 
       let to: Address | undefined;
       let stop$: Observable<any> | undefined;
@@ -56,14 +55,14 @@ export const transferRetryMessageEpic = (
         case transferSigned.type:
           if (action.meta.direction === Direction.SENT) {
             to = action.payload.partner;
-            stop$ = doc$.pipe(
+            stop$ = transfer$.pipe(
               filter(
-                (doc) =>
+                (transfer) =>
                   !!(
-                    doc.transferProcessed ||
-                    doc.unlockProcessed || // unlock|expired shouldn't happen before transferProcessed
-                    doc.expiredProcessed ||
-                    doc.channelClosed
+                    transfer.transferProcessed ||
+                    transfer.unlockProcessed || // unlock|expired shouldn't happen before transferProcessed
+                    transfer.expiredProcessed ||
+                    transfer.channelClosed
                   ),
               ),
             );
@@ -72,34 +71,40 @@ export const transferRetryMessageEpic = (
         case transferUnlock.success.type:
           if (action.meta.direction === Direction.SENT) {
             to = action.payload.partner;
-            stop$ = doc$.pipe(filter((doc) => !!(doc.unlockProcessed || doc.channelClosed)));
+            stop$ = transfer$.pipe(
+              filter((transfer) => !!(transfer.unlockProcessed || transfer.channelClosed)),
+            );
           }
           break;
         case transferExpire.success.type:
           if (action.meta.direction === Direction.SENT) {
             to = action.payload.partner;
-            stop$ = doc$.pipe(filter((doc) => !!(doc.expiredProcessed || doc.channelClosed)));
+            stop$ = transfer$.pipe(
+              filter((transfer) => !!(transfer.expiredProcessed || transfer.channelClosed)),
+            );
           }
           break;
         case transferSecretRequest.type:
-          if (action.meta.direction === Direction.RECEIVED && doc) {
-            to = doc.transfer.initiator;
-            stop$ = combineLatest([state$, doc$]).pipe(
+          if (action.meta.direction === Direction.RECEIVED && transfer) {
+            to = transfer.transfer.initiator;
+            stop$ = combineLatest([state$, transfer$]).pipe(
               filter(
-                ([{ blockNumber }, doc]) =>
-                  /* doc.secret would be enough, but let's test secretReveal to possibly retry
+                ([{ blockNumber }, transfer]) =>
+                  /* transfer.secret would be enough, but let's test secretReveal to possibly retry
                    * failed RevealSecret sign prompts */
-                  !!(doc.secretReveal || doc.channelClosed) ||
+                  !!(transfer.secretReveal || transfer.channelClosed) ||
                   // or when we get inside the danger zone
-                  blockNumber > doc.expiration - revealTimeout,
+                  blockNumber > transfer.expiration - revealTimeout,
               ),
             );
           }
           break;
         case transferSecretReveal.type:
-          if (action.meta.direction === Direction.RECEIVED && doc) {
-            to = doc.partner;
-            stop$ = doc$.pipe(filter((doc) => !!(doc.unlock || doc.channelClosed)));
+          if (action.meta.direction === Direction.RECEIVED && transfer) {
+            to = transfer.partner;
+            stop$ = transfer$.pipe(
+              filter((transfer) => !!(transfer.unlock || transfer.channelClosed)),
+            );
           }
           break;
       }

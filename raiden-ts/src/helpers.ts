@@ -4,7 +4,7 @@ import { Contract, ContractReceipt, ContractTransaction } from 'ethers/contract'
 import { Network, toUtf8Bytes, sha256 } from 'ethers/utils';
 import { JsonRpcProvider } from 'ethers/providers';
 import { MaxUint256 } from 'ethers/constants';
-import { Observable, defer, merge, fromEvent } from 'rxjs';
+import { Observable, defer, merge } from 'rxjs';
 import { filter, map, pluck, withLatestFrom, first, exhaustMap } from 'rxjs/operators';
 import logging from 'loglevel';
 
@@ -15,7 +15,7 @@ import { raidenTransfer } from './transfers/utils';
 import { RaidenTransfer, TransferState, Direction } from './transfers/state';
 import { channelAmounts } from './channels/utils';
 import { RaidenChannels, RaidenChannel } from './channels/state';
-import { pluckDistinct } from './utils/rx';
+import { distinctRecordValues, pluckDistinct } from './utils/rx';
 import { Address, PrivateKey, isntNil, Hash, UInt, decode, Storage } from './utils/types';
 import { getNetworkName } from './utils/ethers';
 import { RaidenError, ErrorCodes } from './utils/error';
@@ -172,12 +172,16 @@ export const getSigner = async (
  * Initializes the [[transfers$]] observable
  * TODO: properly paginate this, in case of too much transfers in history to stream
  *
+ * @param state$ - Observable of RaidenStates
  * @param db - Database instance
  * @returns observable of sent and completed Raiden transfers
  */
-export function initTransfers$(db: RaidenDatabase): Observable<RaidenTransfer> {
+export function initTransfers$(
+  state$: Observable<RaidenState>,
+  db: RaidenDatabase,
+): Observable<RaidenTransfer> {
   return merge(
-    changes$<TransferStateish>(db.storage, {
+    changes$<TransferStateish>(db, {
       since: 0,
       include_docs: true,
       selector: { direction: { $in: Object.values(Direction) } },
@@ -186,8 +190,7 @@ export function initTransfers$(db: RaidenDatabase): Observable<RaidenTransfer> {
       filter(isntNil),
       map((doc) => decode(TransferState, doc)),
     ),
-    fromEvent<TransferState>(db.transfers, 'insert'),
-    fromEvent<[TransferState]>(db.transfers, 'update').pipe(pluck(0)),
+    state$.pipe(pluckDistinct('transfers'), distinctRecordValues(), pluck(1)),
   ).pipe(map(raidenTransfer));
 }
 
@@ -520,10 +523,10 @@ export async function getState(
     db = await migrateDatabase.call(dbCtor, dbName);
   }
 
-  let state = getRaidenState(db);
+  let state = await getRaidenState(db);
   if (!state) {
     state = makeInitialState({ network, address, contractsInfo: contractsInfo });
-    putRaidenState(db, state);
+    await putRaidenState(db, state);
   } else {
     state = decode(RaidenState, state);
   }

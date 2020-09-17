@@ -12,8 +12,8 @@ import { Direction } from '../state';
 import { dispatchAndWait$ } from './utils';
 
 /**
- * Process newBlocks, emits transferExpire.request (request to compose&sign LockExpired for a transfer)
- * if pending transfer's lock expired and transfer didn't unlock (succeed) in time
+ * Process newBlocks, emits transferExpire.request (request to compose&sign LockExpired for a
+ * transfer) if pending transfer's lock expired and transfer didn't unlock (succeed) in time
  * Also, emits transfer.failure, to notify users that a transfer has failed (although it'll only be
  * considered as completed with fail once the transferExpireProcessed arrives).
  *
@@ -21,38 +21,34 @@ import { dispatchAndWait$ } from './utils';
  * @param state$ - Observable of RaidenStates
  * @param deps - Epics dependencies
  * @param deps.config$ - Config observable
- * @param deps.db - Database instance
  * @returns Observable of transferExpire.request|transfer.failure actions
  */
 export const transferAutoExpireEpic = (
   action$: Observable<RaidenAction>,
-  {}: Observable<RaidenState>,
-  { config$, db }: RaidenEpicDeps,
+  state$: Observable<RaidenState>,
+  { config$ }: RaidenEpicDeps,
 ): Observable<transferExpire.request | transfer.failure> =>
   action$.pipe(
     filter(newBlock.is),
     pluck('payload', 'blockNumber'),
-    withLatestFrom(config$),
+    withLatestFrom(state$, config$),
     // With interactive signing sending a lock expired message requires user
     // intervention. In that case it is possible for a new block to arrive
     // while waiting for the user permission, without the `exhaustMap` below
     // multiple signing requests would be emited *for the same lock*.
     // `exhaustMap` prevents that from happening, by blocking new signing
     // requests until the existing ones have been concluded.
-    exhaustMap(([blockNumber, { confirmationBlocks }]) =>
+    exhaustMap(([blockNumber, { transfers }, { confirmationBlocks }]) =>
       from(
-        db.transfers
-          .chain()
-          .find({ direction: Direction.SENT })
-          .where(
-            (r) =>
-              !r.unlock &&
-              !r.expired &&
-              !r.secretRegistered &&
-              !r.channelClosed &&
-              r.expiration <= blockNumber - confirmationBlocks * 2,
-          )
-          .data(),
+        Object.values(transfers).filter(
+          (r) =>
+            r.direction === Direction.SENT &&
+            !r.unlock &&
+            !r.expired &&
+            !r.secretRegistered &&
+            !r.channelClosed &&
+            r.expiration <= blockNumber - confirmationBlocks * 2,
+        ),
       ).pipe(
         mergeMap((doc) => {
           const meta = { secrethash: doc.transfer.lock.secrethash, direction: Direction.SENT };

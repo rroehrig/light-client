@@ -2,8 +2,9 @@ import { concat, hexlify } from 'ethers/utils/bytes';
 import { keccak256, randomBytes, bigNumberify, sha256 } from 'ethers/utils';
 import { HashZero } from 'ethers/constants';
 import { first, mergeMap, map, filter } from 'rxjs/operators';
-import { of, from, defer } from 'rxjs';
+import { of, from, defer, Observable } from 'rxjs';
 
+import { RaidenState } from '../state';
 import { channelUniqueKey } from '../channels/utils';
 import { assert } from '../utils';
 import { Hash, Secret, UInt, HexString, isntNil, decode } from '../utils/types';
@@ -108,24 +109,51 @@ const statusesMap: { [K in RaidenTransferStatus]: (t: TransferState) => number |
 };
 
 /**
+ * @param state - Transfer state
+ * @returns Transfer's status
+ */
+export function transferStatus(state: TransferState) {
+  // order matters! from top to bottom priority, first match breaks loop
+  for (const [s, g] of Object.entries(statusesMap)) {
+    const ts = g(state);
+    if (ts !== undefined) {
+      return s as RaidenTransferStatus;
+    }
+  }
+  return RaidenTransferStatus.pending;
+}
+
+/**
+ * @param state - Transfer state
+ * @returns Whether the transfer is considered completed
+ */
+export function transferCompleted(
+  state: TransferState,
+): state is TransferState &
+  NonNullable<
+    | Pick<TransferState, 'unlockProcessed'>
+    | Pick<TransferState, 'expiredProcessed'>
+    | Pick<TransferState, 'secretRegistered'>
+    | Pick<TransferState, 'channelSettled'>
+  > {
+  return !!(
+    state.unlockProcessed ||
+    state.expiredProcessed ||
+    state.secretRegistered ||
+    state.channelSettled
+  );
+}
+
+/**
  * Convert a TransferState to a public RaidenTransfer object
  *
  * @param state - RaidenState.sent value
  * @returns Public raiden sent transfer info object
  */
 export function raidenTransfer(state: TransferState): RaidenTransfer {
+  const status = transferStatus(state);
   const startedAt = new Date(state.transfer.ts);
-  let changedAt = startedAt;
-  let status = RaidenTransferStatus.pending;
-  // order matters! from top to bottom priority, first match breaks loop
-  for (const [s, g] of Object.entries(statusesMap)) {
-    const ts = g(state);
-    if (ts !== undefined) {
-      status = s as RaidenTransferStatus;
-      changedAt = new Date(ts);
-      break;
-    }
-  }
+  const changedAt = new Date(statusesMap[status](state)!);
   const transfer = state.transfer;
   const direction = state.direction;
   const value = transfer.lock.amount.sub(state.fee);
@@ -136,12 +164,7 @@ export function raidenTransfer(state: TransferState): RaidenTransfer {
       : invalidSecretRequest || state.expired || state.channelClosed
       ? false
       : undefined;
-  const completed = !!(
-    state.unlockProcessed ||
-    state.expiredProcessed ||
-    state.secretRegistered ||
-    state.channelSettled
-  );
+  const completed = transferCompleted(state);
   return {
     key: transferKey(state),
     secrethash: transfer.lock.secrethash,
@@ -186,7 +209,7 @@ export function findBalanceProofMatchingBalanceHash$(
   if (balanceHash === HashZero) return of(BalanceProofZero);
   return defer(() =>
     // use db.storage directly instead of db.transfers to search on historical data
-    db.storage.find({ selector: { channel: channelUniqueKey(channel), direction } }),
+    db.find({ selector: { channel: channelUniqueKey(channel), direction } }),
   ).pipe(
     mergeMap(({ docs }) => from(docs as TransferStateish[])),
     mergeMap((doc) => {
@@ -198,4 +221,21 @@ export function findBalanceProofMatchingBalanceHash$(
     // will error observable if none matching is found
     first((bp) => createBalanceHash(bp) === balanceHash),
   );
+}
+
+/**
+ * @param state - RaidenState or Observable of RaidenState to get transfer from
+ * @param db - Try to fetch from db if not found on state
+ * @param key - transferKey/_id to get
+ * @returns Promise to TransferState
+ */
+export async function getTransfer(
+  state: RaidenState | Observable<RaidenState>,
+  db: RaidenDatabase,
+  key: string | { secrethash: Hash; direction: Direction },
+): Promise<TransferState> {
+  if (typeof key !== 'string') key = transferKey(key);
+  if (!('address' in state)) state = await state.pipe(first()).toPromise();
+  if (key in state.transfers) return state.transfers[key];
+  return decode(TransferState, await db.get<TransferStateish>(key));
 }

@@ -1,16 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import {
-  defer,
-  merge,
-  Observable,
-  fromEvent,
-  throwError,
-  from,
-  of,
-  concat,
-  fromEventPattern,
-} from 'rxjs';
-import { mergeMap, pluck, takeUntil, filter, finalize, concatMap, take } from 'rxjs/operators';
+import { defer, merge, fromEvent, throwError, from, BehaviorSubject } from 'rxjs';
+import { mergeMap, pluck, takeUntil, finalize, concatMap } from 'rxjs/operators';
 import { bigNumberify } from 'ethers/utils';
 import { HashZero } from 'ethers/constants';
 
@@ -18,43 +8,55 @@ import PouchDB from 'pouchdb';
 import PouchDBFind from 'pouchdb-find';
 PouchDB.plugin(PouchDBFind);
 
-import Loki from 'lokijs';
-
 import { ErrorCodes, assert } from '../utils/error';
 import { RaidenState } from '../state';
 import { Channel } from '../channels';
 import { channelKey, channelUniqueKey } from '../channels/utils';
 import { last, Address } from '../utils/types';
 
-import { TransferState } from '../transfers/state';
 import {
-  RaidenStorage,
+  RaidenDatabase,
   Migrations,
   RaidenDatabaseMeta,
   RaidenDatabaseOptions,
-  RaidenStorageConstructor,
-  RaidenDatabase,
-  StateMember,
+  RaidenDatabaseConstructor,
+  TransferStateish,
 } from './types';
-import { getDefaultPouchAdapter, LokiRaidenAdapter } from './adapter';
+import { getDefaultPouchAdapter } from './adapter';
 import defaultMigrations from './migrations';
+
+const statePrefix = 'state.';
+const channelsPrefix = 'channels.';
+
+/**
+ * @param prefix - Prefix to query for
+ * @param descending - Wether to swap start & endkey for reverse reverse search
+ * @returns allDocs's options to fetch all documents which keys start with prefix
+ */
+function byPrefix(prefix: string, descending = false) {
+  const start = prefix;
+  const end = prefix + '\ufff0';
+  return !descending
+    ? { startkey: start, endkey: end }
+    : { startkey: end, endkey: start, descending };
+}
 
 /**
  * @param this - RaidenStorage constructor, as static factory param
  * @param name - Name of database to check
  * @returns Promise to database, if it exists, false otherwise
  */
-async function storageExists(
-  this: RaidenStorageConstructor,
+async function databaseExists(
+  this: RaidenDatabaseConstructor,
   name: string,
-): Promise<false | RaidenStorage> {
-  const storage = new this(name);
-  const info = await storage.info();
+): Promise<false | RaidenDatabase> {
+  const db = new this(name);
+  const info = await db.info();
   if (info.doc_count === 0 && info.update_seq == 0) {
-    await storage.destroy();
+    await db.destroy();
     return false;
   }
-  return storage;
+  return db;
 }
 
 /**
@@ -62,30 +64,33 @@ async function storageExists(
  * @param name - Database name or path
  * @returns RaidenStorage
  */
-async function makeStorage(this: RaidenStorageConstructor, name: string): Promise<RaidenStorage> {
-  const storage = new this(name);
-  storage.setMaxListeners(30);
+async function makeDatabase(
+  this: RaidenDatabaseConstructor,
+  name: string,
+): Promise<RaidenDatabase> {
+  const db = new this(name);
+  db.setMaxListeners(30);
 
   await Promise.all([
-    storage.createIndex({
+    db.createIndex({
       index: {
-        name: 'completed', // selects channels where no further action is possible/needed
-        fields: ['direction', 'unlockProcessed', 'expiredProcessed', 'channelSettled'],
+        name: 'byCleared',
+        fields: ['cleared', 'direction'],
       },
     }),
-    storage.createIndex({
+    db.createIndex({
       index: {
         name: 'byPartner',
         fields: ['direction', 'partner'],
       },
     }),
-    storage.createIndex({
+    db.createIndex({
       index: {
         name: 'bySecrethash',
         fields: ['secrethash'],
       },
     }),
-    storage.createIndex({
+    db.createIndex({
       index: {
         name: 'byChannel',
         fields: ['channel'],
@@ -93,64 +98,26 @@ async function makeStorage(this: RaidenStorageConstructor, name: string): Promis
     }),
   ]);
 
-  return storage;
-}
-
-async function makeDatabase(storage: RaidenStorage): Promise<RaidenDatabase> {
-  const db = await new Promise<Loki>((resolve, reject) => {
-    const db: Loki = new Loki(storage.name, {
-      adapter: new LokiRaidenAdapter(storage),
-      autoload: true,
-      autoloadCallback: (res) => (res ? reject(res) : resolve(db)),
-    });
-  });
-  const state = db.getCollection<StateMember>('state');
-  const channels = db.getCollection<Channel>('channels');
-  const transfers = db.getCollection<TransferState>('transfers');
-
-  // replace setInterval-based autosave logic with insta-save-when-dirty using getters/setters
-  db.collections.forEach((coll) => {
-    let dirty = false;
-    Object.defineProperty(coll, 'dirty', {
-      get: () => dirty,
-      set: (v: boolean) => {
-        dirty = v;
-        if (v) db.saveDatabase();
-      },
-    });
-  });
-
-  // populate transfersKeys with all keys from database, since loki only keep track of a subset
-  // of the transfers
   const storageKeys = new Set<string>();
-  const results = await storage.allDocs({ startkey: 'a', endkey: 'z\ufff0' });
+  const results = await db.allDocs({ startkey: 'a', endkey: 'z\ufff0' });
   results.rows.forEach(({ id }) => storageKeys.add(id));
+  const busy$ = new BehaviorSubject<boolean>(false);
 
-  return { storage, db, state, channels, transfers, storageKeys };
-}
-
-/**
- * @param coll - Collection to upsert into
- * @param data - Data to be upserted
- */
-export function upsert<T extends { _id: string }>(coll: Loki.Collection<T>, data: T) {
-  const doc = coll.by('_id', data._id);
-  if (doc) coll.update({ ...doc, ...data });
-  else coll.insert(data);
+  return Object.assign(db, { storageKeys, busy$ });
 }
 
 /**
  * Create observable of PouchDB.changes stream, with proper teardown
  *
- * @param storage - Database to upsert doc in
+ * @param db - Database to monitor for changes
  * @param options - db.changes options
  * @returns Observable of changes responses
  */
 // eslint-disable-next-line @typescript-eslint/ban-types
-export function changes$<T = {}>(storage: RaidenStorage, options?: PouchDB.Core.ChangesOptions) {
+export function changes$<T = {}>(db: RaidenDatabase, options?: PouchDB.Core.ChangesOptions) {
   // concat allows second defer to be skipped in case of first()/take(1) succeeding
   return defer(() => {
-    const feed = storage.changes<T>(options);
+    const feed = db.changes<T>(options);
     return merge(
       fromEvent<[PouchDB.Core.ChangesResponseChange<T>]>(feed, 'change'),
       fromEvent<any>(feed, 'error').pipe(mergeMap((error) => throwError(error))),
@@ -163,34 +130,6 @@ export function changes$<T = {}>(storage: RaidenStorage, options?: PouchDB.Core.
 }
 
 /**
- * Find or wait for a document by _id and re-emit it whenever it changes
- *
- * @param collection - Collection to fetch/listen events from
- * @param docId - doc._id to monitor
- * @returns Observable of docs changes
- */
-export function get$<T extends { _id: string } = { _id: string }>(
-  collection: Loki.Collection<T>,
-  docId: string,
-): Observable<T> {
-  const on = <U>(eventName: string) =>
-    fromEventPattern<U>(
-      (handler) => collection.addListener(eventName, handler),
-      // synchronous removeListener would raise issues with listeners.forEach from LokiEventEmitter
-      (handler) => setTimeout(() => collection.removeListener(eventName, handler), 0),
-    );
-  const filterDoc = filter<T>(({ _id }) => _id === docId);
-  return concat(
-    defer(() => {
-      const doc = collection.by('_id', docId);
-      if (doc) return of(doc);
-      return on<T>('insert').pipe(filterDoc, take(1));
-    }),
-    on<[T, T]>('update').pipe(pluck(0), filterDoc),
-  ).pipe(takeUntil(on<T>('delete').pipe(filterDoc)));
-}
-
-/**
  * [[dbStateEpic]] stores each key of RaidenState as independent value on the database, prefixed
  * with 'state.', to make it cheaper to save changes touching only a subset of the state.
  * 'channels' (being a special hotpath of complex objects) are split as one entry per channel.
@@ -200,39 +139,67 @@ export function get$<T extends { _id: string } = { _id: string }>(
  * @param db - Database to query state from
  * @returns mapping object potentially decodable to RaidenState
  */
-export function getRaidenState(db: RaidenDatabase): any | undefined {
-  const state = { channels: {}, oldChannels: {} } as any;
+export async function getRaidenState(db: RaidenDatabase): Promise<any | undefined> {
+  const { log } = db.constructor.__defaults;
+  const state = { channels: {}, oldChannels: {}, transfers: {} } as any;
 
-  for (const { _id, value } of db.state.find()) {
-    state[_id] = value;
+  const stateResults = await db.allDocs<{ _id: string; value: any }>({
+    ...byPrefix(statePrefix),
+    include_docs: true,
+  });
+  for (const { id, doc } of stateResults.rows) {
+    state[id.substr(statePrefix.length)] = doc!.value;
   }
-  for (const doc of db.channels.find()) {
-    if ('settleBlock' in doc) state.oldChannels[doc._id] = doc;
-    else state.channels[channelKey(doc)] = doc;
+
+  const channelsResults = await db.allDocs<Channel>({
+    ...byPrefix(channelsPrefix),
+    include_docs: true,
+  });
+  for (const { id, doc } of channelsResults.rows) {
+    if ('settleBlock' in doc!)
+      state.oldChannels[id] = { ...doc!, _id: id.substr(channelsPrefix.length) };
+    else state.channels[channelKey(doc!)] = { ...doc!, _id: id.substr(channelsPrefix.length) };
+  }
+
+  const transfersResults = await db.find({
+    selector: {
+      cleared: 0,
+      direction: { $exists: true },
+    },
+  });
+  if (transfersResults.warning) log?.warn?.(transfersResults.warning, 'getRaidenState');
+  for (const doc of transfersResults.docs) {
+    state.transfers[doc._id] = doc;
   }
 
   if ('address' in state) return state;
 }
 
 /**
- * Like [[dbStateEpic]], stores each key of RaidenState as independent value on the database,
- * prefixed * with 'state.', to make it cheaper to save changes touching only a subset of the state.
+ * Stores each key of RaidenState as independent value on the database, prefixed * with 'state.',
+ * to make it cheaper to save changes touching only a subset of the state.
  * 'channels' (being a special hotpath of complex objects) are split as one entry per channel.
  * Used to store initial state (on empty db)
  *
  * @param db - Database to store state into
  * @param state - State to persist
  */
-export function putRaidenState(db: RaidenDatabase, state: RaidenState): void {
+export async function putRaidenState(db: RaidenDatabase, state: RaidenState): Promise<void> {
+  const docs = [];
   for (const [key, value] of Object.entries(state)) {
     if (key === 'channels' || key === 'oldChannels') {
       for (const channel of Object.values<Channel>(value)) {
-        db.channels.insert(channel);
+        docs.push({ ...channel, _id: channelsPrefix + channel._id });
+      }
+    } else if (key === 'transfers') {
+      for (const transfer of Object.values<TransferStateish>(value)) {
+        docs.push(transfer);
       }
     } else {
-      db.state.insert({ _id: key, value });
+      docs.push({ _id: statePrefix + key, value });
     }
   }
+  await db.bulkDocs(docs);
 }
 
 function sortMigrations(migrations: Migrations): number[] {
@@ -245,8 +212,8 @@ function latestVersion(migrations: Migrations = defaultMigrations): number {
   return last(sortMigrations(migrations)) ?? 0;
 }
 
-function databaseVersion(storage: RaidenStorage): number {
-  return +storage.name.match(/_(\d+)$/)![1];
+function databaseVersion(db: RaidenDatabase): number {
+  return +db.name.match(/_(\d+)$/)![1];
 }
 
 /**
@@ -255,9 +222,9 @@ function databaseVersion(storage: RaidenStorage): number {
  */
 export async function getDatabaseConstructorFromOptions(
   opts: RaidenDatabaseOptions,
-): Promise<RaidenStorageConstructor> {
+): Promise<RaidenDatabaseConstructor> {
   if (!opts.adapter) opts.adapter = await getDefaultPouchAdapter();
-  return PouchDB.defaults(opts) as RaidenStorageConstructor;
+  return PouchDB.defaults(opts) as RaidenDatabaseConstructor;
 }
 
 /**
@@ -275,7 +242,7 @@ export async function getDatabaseConstructorFromOptions(
  * @returns Promise to instance of currentVersion of database
  */
 export async function migrateDatabase(
-  this: RaidenStorageConstructor,
+  this: RaidenDatabaseConstructor,
   name: string,
   migrations: Migrations = defaultMigrations,
   cleanOld = false,
@@ -284,35 +251,35 @@ export async function migrateDatabase(
   const sortedMigrations = sortMigrations(migrations);
 
   let version = 0;
-  let storage: RaidenStorage | undefined;
+  let db: RaidenDatabase | undefined;
   for (let i = sortedMigrations.length - 1; i >= 0; --i) {
     const _version = sortedMigrations[i];
-    const _storage = await storageExists.call(this, `${name}_${_version}`);
-    if (_storage) {
+    const _db = await databaseExists.call(this, `${name}_${_version}`);
+    if (_db) {
       version = _version;
-      storage = _storage;
+      db = _db;
       break;
     }
   }
-  if (!storage) {
+  if (!db) {
     version = latestVersion(migrations);
-    storage = await makeStorage.call(this, `${name}_${version}`);
+    db = await makeDatabase.call(this, `${name}_${version}`);
   }
 
   for (const newVersion of sortedMigrations) {
     if (newVersion <= version) continue;
-    const newStorage = await makeStorage.call(this, `${name}_${newVersion}`);
+    const newStorage = await makeDatabase.call(this, `${name}_${newVersion}`);
 
     try {
       const keyRe = /^[a-z]/i;
-      await changes$(storage, {
+      await changes$(db, {
         since: 0,
         include_docs: true,
         filter: ({ _id }) => keyRe.test(_id),
       })
         .pipe(
           concatMap((change) =>
-            defer(() => migrations[newVersion](change.doc!, storage!)).pipe(
+            defer(() => migrations[newVersion](change.doc!, db!)).pipe(
               mergeMap((results) => from(results)),
               concatMap(async (result) => {
                 if ('_rev' in result) delete result['_rev'];
@@ -328,32 +295,28 @@ export async function migrateDatabase(
       throw err;
     }
     log?.info?.('Migrated db', { from: version, to: newVersion });
-    if (cleanOld) await storage.destroy();
-    else await storage.close();
+    if (cleanOld) await db.destroy();
+    else await db.close();
     version = newVersion;
-    storage = newStorage;
+    db = newStorage;
   }
-  const db = await makeDatabase(storage);
   // shouldn't fail
-  assert(databaseVersion(db.storage) === latestVersion(migrations), 'Not latest version');
+  assert(databaseVersion(db) === latestVersion(migrations), 'Not latest version');
   return db;
 }
 
-const statePrefix = 'state.';
-const channelsPrefix = 'channels.';
-
 /**
- * @param storage - Raiden database to fetch meta from
+ * @param db - Raiden database to fetch meta from
  * @returns Promise which resolves to meta information from database
  */
-export async function databaseMeta(storage: RaidenStorage): Promise<RaidenDatabaseMeta> {
+export async function databaseMeta(db: RaidenDatabase): Promise<RaidenDatabaseMeta> {
   return {
     _id: '_meta',
-    version: databaseVersion(storage),
-    network: (await storage.get<{ value: number }>(statePrefix + 'chainId')).value,
-    registry: (await storage.get<{ value: Address }>(statePrefix + 'registry')).value,
-    address: (await storage.get<{ value: Address }>(statePrefix + 'address')).value,
-    blockNumber: (await storage.get<{ value: number }>(statePrefix + 'blockNumber')).value,
+    version: databaseVersion(db),
+    network: (await db.get<{ value: number }>(statePrefix + 'chainId')).value,
+    registry: (await db.get<{ value: Address }>(statePrefix + 'registry')).value,
+    address: (await db.get<{ value: Address }>(statePrefix + 'address')).value,
+    blockNumber: (await db.get<{ value: number }>(statePrefix + 'blockNumber')).value,
   };
 }
 
@@ -377,7 +340,7 @@ function isAsyncIterable<T>(v: Iterable<T> | AsyncIterable<T>): v is AsyncIterab
  * @returns Promise to instance of currentVersion of database
  */
 export async function replaceDatabase(
-  this: RaidenStorageConstructor,
+  this: RaidenDatabaseConstructor,
   data: Iterable<any> | AsyncIterable<any>,
   name: string,
   migrations: Migrations = defaultMigrations,
@@ -392,9 +355,9 @@ export async function replaceDatabase(
   // ensure db's current version in store is older than replacement
   for (let version = latestVersion(migrations); version >= meta.version; --version) {
     const dbName = `${name}_${version}`;
-    const storage = await storageExists.call(this, dbName);
-    if (!storage) continue;
-    const dbMeta = await databaseMeta(storage);
+    const db = await databaseExists.call(this, dbName);
+    if (!db) continue;
+    const dbMeta = await databaseMeta(db);
     assert(
       meta.version >= version && meta.blockNumber > dbMeta.blockNumber,
       ErrorCodes.RDN_STATE_MIGRATION,
@@ -422,19 +385,19 @@ export async function replaceDatabase(
       log?.error,
     );
     // drop versions which would make migration fail
-    await storage.destroy();
+    await db.destroy();
   }
 
   // iterate and insert entries into db for replacement's version
   const dbName = `${name}_${meta.version}`;
-  const storage = await makeStorage.call(this, dbName);
+  const db = await makeDatabase.call(this, dbName);
   let next = await iter.next();
   while (!next.done) {
     const doc = next.value;
     if ('_rev' in doc) delete doc['_rev'];
-    [next] = await Promise.all([iter.next(), storage.put(doc)]);
+    [next] = await Promise.all([iter.next(), db.put(doc)]);
   }
-  await storage.close();
+  await db.close();
 
   // at this point, `{name}_{meta.version}` database should contain all (and only) data from
   // iterable, and no later version of database should exist, so we can safely migrate
@@ -451,23 +414,20 @@ function keyAfter(key: string): string {
  * invalidate previous dump.  Caller must ensure the database can't change while dumping or handle
  * the exception to restart.
  *
- * @param storage - Database to dump
+ * @param db - Database to dump
  * @param opts - Options
  * @param opts.batch - Size of batches to fetch and yield
  * @returns Generator of documents
  */
-export async function* dumpDatabase(
-  storage: RaidenStorage,
-  { batch = 10 }: { batch?: number } = {},
-) {
+export async function* dumpDatabase(db: RaidenDatabase, { batch = 10 }: { batch?: number } = {}) {
   let changed: string | undefined;
-  const feed = storage.changes({ since: 'now', live: true });
+  const feed = db.changes({ since: 'now', live: true });
   feed.on('change', ({ id }) => (changed = id));
   try {
-    yield await databaseMeta(storage);
+    yield await databaseMeta(db);
     let startkey = 'a';
     while (true) {
-      const results = await storage.allDocs({
+      const results = await db.allDocs({
         startkey,
         endkey: '\ufff0',
         limit: batch,
@@ -486,8 +446,8 @@ export async function* dumpDatabase(
   }
 }
 
-async function reopenStorage(storage: RaidenStorage): Promise<RaidenStorage> {
-  return makeStorage.call(storage.constructor, storage.name);
+async function reopenDatabase(db: RaidenDatabase): Promise<RaidenDatabase> {
+  return makeDatabase.call(db.constructor, db.name);
 }
 
 /**
@@ -499,21 +459,20 @@ async function reopenStorage(storage: RaidenStorage): Promise<RaidenStorage> {
  * @returns Array of documents
  */
 export async function dumpDatabaseToArray(db: RaidenDatabase, opts?: { batch?: number }) {
-  let storage = db.storage;
-  const { log } = storage.constructor.__defaults;
+  const { log } = db.constructor.__defaults;
   let shouldCloseAfter = false;
   for (let _try = 10; _try > 0; --_try) {
     try {
       const result = [];
-      for await (const doc of dumpDatabase(storage, opts)) {
+      for await (const doc of dumpDatabase(db, opts)) {
         result.push(doc);
       }
-      if (shouldCloseAfter) await storage.close(); // on success
+      if (shouldCloseAfter) await db.close(); // on success
       return result;
     } catch (e) {
       if (e.message?.includes?.('database is closed')) {
         shouldCloseAfter = true;
-        storage = await reopenStorage(storage);
+        db = await reopenDatabase(db);
       }
       log?.warn?.('Restarting dump because', e);
     }
@@ -554,6 +513,7 @@ export function* legacyStateMigration(state: any) {
           )
             .toString()
             .padStart(9, '0')}`,
+          cleared: 0,
           ...(transfer.secret?.registerBlock
             ? {
                 secretRegistered: {

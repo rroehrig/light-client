@@ -16,7 +16,7 @@ import {
   WithdrawExpired,
 } from '../messages/types';
 import { Paths } from '../services/types';
-import { DirectionC } from './state';
+import { DirectionC, TransferState } from './state';
 
 const TransferId = t.type({
   secrethash: Hash,
@@ -181,6 +181,12 @@ export const transferExpireProcessed = createAction(
   TransferId,
 );
 export interface transferExpireProcessed extends ActionType<typeof transferExpireProcessed> {}
+
+export const transferClear = createAction('transfer/clear', t.undefined, TransferId);
+export interface transferClear extends ActionType<typeof transferClear> {}
+
+export const transferLoad = createAction('transfer/load', TransferState, TransferId);
+export interface transferLoad extends ActionType<typeof transferLoad> {}
 
 // Withdraw actions
 

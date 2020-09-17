@@ -12,7 +12,7 @@ import { createLogger } from 'redux-logger';
 import constant from 'lodash/constant';
 import memoize from 'lodash/memoize';
 import { Observable, AsyncSubject, merge, defer, EMPTY, ReplaySubject, of } from 'rxjs';
-import { first, filter, map, mergeMap, skip } from 'rxjs/operators';
+import { first, filter, map, mergeMap, skip, pluck } from 'rxjs/operators';
 import logging from 'loglevel';
 
 import { TokenNetworkRegistryFactory } from './contracts/TokenNetworkRegistryFactory';
@@ -30,7 +30,7 @@ import { ShutdownReason } from './constants';
 import { RaidenState } from './state';
 import { RaidenConfig, PartialRaidenConfig, makeDefaultConfig } from './config';
 import { RaidenChannels, ChannelState } from './channels/state';
-import { RaidenTransfer, Direction } from './transfers/state';
+import { RaidenTransfer, Direction, TransferState } from './transfers/state';
 import { raidenReducer } from './reducer';
 import { raidenRootEpic, getLatest$ } from './epics';
 import {
@@ -81,7 +81,7 @@ import {
 } from './helpers';
 import { RaidenError, ErrorCodes } from './utils/error';
 import { RaidenDatabase } from './db/types';
-import { get$, dumpDatabaseToArray } from './db/utils';
+import { dumpDatabaseToArray } from './db/utils';
 import { createPersisterMiddleware } from './persister';
 
 export class Raiden {
@@ -192,7 +192,7 @@ export class Raiden {
     // pipe action, skipping cached
     this.action$ = latest$.pipe(pluckDistinct('action'), skip(1));
     this.channels$ = this.state$.pipe(pluckDistinct('channels'), map(mapRaidenChannels));
-    this.transfers$ = initTransfers$(db);
+    this.transfers$ = initTransfers$(this.state$, db);
     this.events$ = this.action$.pipe(filter(isActionOf(RaidenEvents)));
 
     this.getTokenInfo = memoize(async function (this: Raiden, token: string) {
@@ -966,10 +966,14 @@ export class Raiden {
    */
   public async waitTransfer(transferKey: string): Promise<RaidenTransfer> {
     const { direction, secrethash } = transferKeyToMeta(transferKey);
-    const doc = this.deps.db.transfers.by('_id', transferKey);
-    assert(doc, ErrorCodes.RDN_UNKNOWN_TRANSFER, this.log.info);
+    let transferState = this.state.transfers[transferKey];
+    if (!transferState)
+      try {
+        transferState = decode(TransferState, await this.deps.db.get(transferKey));
+      } catch (e) {}
+    assert(transferState, ErrorCodes.RDN_UNKNOWN_TRANSFER, this.log.info);
 
-    const raidenTransf = raidenTransfer(doc);
+    const raidenTransf = raidenTransfer(transferState);
     // already completed/past transfer
     if (raidenTransf.completed) {
       if (raidenTransf.success) return raidenTransf;
@@ -979,8 +983,11 @@ export class Raiden {
 
     // throws/rejects if a failure occurs
     await asyncActionToPromise(transfer, { secrethash, direction }, this.action$);
-    const finalState = await get$(this.deps.db.transfers, transferKey)
-      .pipe(first((doc) => !!doc.unlockProcessed))
+    const finalState = await this.state$
+      .pipe(
+        pluck('transfers', transferKey),
+        first((transferState) => !!transferState.unlockProcessed),
+      )
       .toPromise();
     this.log.info('Transfer successful', {
       key: transferKey,

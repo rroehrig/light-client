@@ -1,5 +1,5 @@
 import { Observable } from 'rxjs';
-import { ignoreElements, finalize } from 'rxjs/operators';
+import { ignoreElements, first, finalize } from 'rxjs/operators';
 
 import { RaidenAction } from '../actions';
 import { RaidenState } from '../state';
@@ -22,10 +22,13 @@ export const dbShutdownEpic = (
   action$.pipe(
     ignoreElements(),
     finalize(async () => {
-      // we can't use loki.close callback because we replace setInterval-based autosave
-      db.db.close();
-      // so we simply wait for any pending saveDatabase to complete before closing storage
-      while (db.db.throttledSavePending) await new Promise((resolve) => setTimeout(resolve, 1));
-      db.storage.close();
+      await db.busy$.pipe(first((busy) => !busy)).toPromise();
+      db.busy$.next(true);
+      try {
+        await db.close();
+      } finally {
+        db.busy$.next(false);
+        db.busy$.complete();
+      }
     }),
   );

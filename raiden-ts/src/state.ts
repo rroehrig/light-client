@@ -11,6 +11,7 @@ import { ChannelKey } from './channels/types';
 import { Channel } from './channels/state';
 import { RaidenMatrixSetup } from './transport/state';
 import { IOU } from './services/types';
+import { TransferState } from './transfers/state';
 
 // types
 const _RaidenState = t.readonly(
@@ -30,6 +31,7 @@ const _RaidenState = t.readonly(
         rooms: t.readonly(t.record(t.string /* partner: Address */, t.array(t.string))),
       }),
     ),
+    transfers: t.readonly(t.record(t.string /*: key: TransferKey */, TransferState)),
     iou: t.readonly(
       t.record(
         t.string /* tokenNetwork: Address */,
@@ -79,6 +81,7 @@ export function makeInitialState(
     oldChannels: {},
     tokens: {},
     transport: {},
+    transfers: {},
     iou: {},
     pendingTxs: [],
     config: {},
