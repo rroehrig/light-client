@@ -213,7 +213,10 @@ function shutdownRaiden(this: Cli): void {
 
 function registerShutdownHooks(this: Cli): void {
   // raiden shutdown triggers server shutdown
-  this.raiden.state$.subscribe(undefined, shutdownServer.bind(this), shutdownServer.bind(this));
+  this.raiden.state$.subscribe({
+    error: shutdownServer.bind(this),
+    complete: shutdownServer.bind(this),
+  });
   process.on('SIGINT', shutdownRaiden.bind(this));
   process.on('SIGTERM', shutdownRaiden.bind(this));
 }

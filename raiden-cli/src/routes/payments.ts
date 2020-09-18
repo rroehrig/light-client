@@ -80,8 +80,8 @@ async function doTransfer(this: Cli, request: Request, response: Response, next:
     const transferKey = await this.raiden.transfer(
       request.params.tokenAddress,
       request.params.targetAddress,
-      request.body.amount,
-      { paymentId: request.body.identifier, lockTimeout: request.body.lock_timeout },
+      request.body.amount.toString(),
+      { paymentId: request.body.identifier.toString(), lockTimeout: request.body.lock_timeout },
     );
     const transfer = await this.raiden.waitTransfer(transferKey);
     response.send(transformSdkTransferToApiPayment(transfer));
