@@ -9,3 +9,6 @@ PouchDB.plugin(MemAdapter);
 import PouchDebug from 'pouchdb-debug';
 PouchDB.plugin(PouchDebug);
 // PouchDB.debug.enable('*');
+
+import logging from 'loglevel';
+logging.setLevel(logging.levels.DEBUG);

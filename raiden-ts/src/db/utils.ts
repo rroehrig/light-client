@@ -3,6 +3,8 @@ import { defer, merge, fromEvent, throwError, from, BehaviorSubject } from 'rxjs
 import { mergeMap, pluck, takeUntil, finalize, concatMap } from 'rxjs/operators';
 import { bigNumberify } from 'ethers/utils';
 import { HashZero } from 'ethers/constants';
+import logging from 'loglevel';
+import omit from 'lodash/fp/omit';
 
 import PouchDB from 'pouchdb';
 import PouchDBFind from 'pouchdb-find';
@@ -41,6 +43,15 @@ function byPrefix(prefix: string, descending = false) {
     : { startkey: end, endkey: start, descending };
 }
 
+async function databaseProps(db: RaidenDatabase) {
+  const storageKeys = new Set<string>();
+  const results = await db.allDocs({ startkey: 'a', endkey: 'z\ufff0' });
+  results.rows.forEach(({ id }) => storageKeys.add(id));
+  const busy$ = new BehaviorSubject<boolean>(false);
+
+  return Object.assign(db, { storageKeys, busy$ });
+}
+
 /**
  * @param this - RaidenStorage constructor, as static factory param
  * @param name - Name of database to check
@@ -49,14 +60,14 @@ function byPrefix(prefix: string, descending = false) {
 async function databaseExists(
   this: RaidenDatabaseConstructor,
   name: string,
-): Promise<false | RaidenDatabase> {
+): Promise<RaidenDatabase | undefined> {
   const db = new this(name);
   const info = await db.info();
   if (info.doc_count === 0 && info.update_seq == 0) {
     await db.destroy();
-    return false;
+    return;
   }
-  return db;
+  return databaseProps(db);
 }
 
 /**
@@ -98,12 +109,7 @@ async function makeDatabase(
     }),
   ]);
 
-  const storageKeys = new Set<string>();
-  const results = await db.allDocs({ startkey: 'a', endkey: 'z\ufff0' });
-  results.rows.forEach(({ id }) => storageKeys.add(id));
-  const busy$ = new BehaviorSubject<boolean>(false);
-
-  return Object.assign(db, { storageKeys, busy$ });
+  return databaseProps(db);
 }
 
 /**
@@ -202,17 +208,29 @@ export async function putRaidenState(db: RaidenDatabase, state: RaidenState): Pr
   await db.bulkDocs(docs);
 }
 
-function sortMigrations(migrations: Migrations): number[] {
+/**
+ * @param migrations - Migrations mapping
+ * @returns Sorted versions array according with migrations
+ */
+export function sortMigrations(migrations: Migrations): number[] {
   return Object.keys(migrations)
     .map((k) => +k)
     .sort();
 }
 
-function latestVersion(migrations: Migrations = defaultMigrations): number {
+/**
+ * @param migrations - Migrations mapping
+ * @returns Latest/current db version from migrations
+ */
+export function latestVersion(migrations: Migrations = defaultMigrations): number {
   return last(sortMigrations(migrations)) ?? 0;
 }
 
-function databaseVersion(db: RaidenDatabase): number {
+/**
+ * @param db - Raiden database
+ * @returns Version of db passed as param
+ */
+export function databaseVersion(db: RaidenDatabase): number {
   return +db.name.match(/_(\d+)$/)![1];
 }
 
@@ -221,8 +239,9 @@ function databaseVersion(db: RaidenDatabase): number {
  * @returns Constructor function for RaidenStorage
  */
 export async function getDatabaseConstructorFromOptions(
-  opts: RaidenDatabaseOptions,
+  opts: RaidenDatabaseOptions = { log: logging },
 ): Promise<RaidenDatabaseConstructor> {
+  if (!opts.log) opts.log = logging;
   if (!opts.adapter) opts.adapter = await getDefaultPouchAdapter();
   return PouchDB.defaults(opts) as RaidenDatabaseConstructor;
 }
@@ -252,6 +271,7 @@ export async function migrateDatabase(
 
   let version = 0;
   let db: RaidenDatabase | undefined;
+  // try to load some version present on migrations
   for (let i = sortedMigrations.length - 1; i >= 0; --i) {
     const _version = sortedMigrations[i];
     const _db = await databaseExists.call(this, `${name}_${_version}`);
@@ -261,6 +281,9 @@ export async function migrateDatabase(
       break;
     }
   }
+  // if didn't find, try to load default version=0 (not present on migrations)
+  if (!db) db = await databaseExists.call(this, `${name}_${version}`);
+  // if still didn't find an existing database, create a new one for latestVersion
   if (!db) {
     version = latestVersion(migrations);
     db = await makeDatabase.call(this, `${name}_${version}`);
@@ -294,7 +317,7 @@ export async function migrateDatabase(
       newStorage.destroy();
       throw err;
     }
-    log?.info?.('Migrated db', { from: version, to: newVersion });
+    log?.info?.('Migrated db', { name, from: version, to: newVersion });
     if (cleanOld) await db.destroy();
     else await db.close();
     version = newVersion;
@@ -397,6 +420,7 @@ export async function replaceDatabase(
     if ('_rev' in doc) delete doc['_rev'];
     [next] = await Promise.all([iter.next(), db.put(doc)]);
   }
+  log?.warn?.('Replaced/loaded database', { name, meta });
   await db.close();
 
   // at this point, `{name}_{meta.version}` database should contain all (and only) data from
@@ -434,7 +458,7 @@ export async function* dumpDatabase(db: RaidenDatabase, { batch = 10 }: { batch?
         include_docs: true,
       });
 
-      yield* results.rows.map(({ doc }) => doc!);
+      yield* results.rows.map(({ doc }) => omit(['_rev'], doc!));
       assert(!changed, ['Database changed while dumping', { key: changed! }]);
 
       const end = last(results.rows);

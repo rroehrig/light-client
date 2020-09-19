@@ -73,7 +73,6 @@ import { RaidenDatabaseConstructor } from 'raiden-ts/db/types';
 import { getNetworkName } from 'raiden-ts/utils/ethers';
 import { createPersisterMiddleware } from 'raiden-ts/persister';
 
-logging.setLevel(logging.levels.DEBUG);
 const RaidenPouchDB = PouchDB.defaults({
   adapter: 'memory',
   log: logging,

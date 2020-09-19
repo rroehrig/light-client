@@ -85,8 +85,7 @@
                 "_hex": "0x01"
             }
         },
-        "_id": "channels.0x3EA2a1fED7FdEf300DA19E97092Ce8FdF8bf66A3@0xb0d5EeAeB7b084a2ba92C24b79f4f2D079A3062b#000005384",
-        "_rev": "3-3a1436d15e4435838c9f59b7348a2f8c"
+        "_id": "channels.0x3EA2a1fED7FdEf300DA19E97092Ce8FdF8bf66A3@0xb0d5EeAeB7b084a2ba92C24b79f4f2D079A3062b#000005384"
     },
     {
         "id": 5361,
@@ -166,8 +165,7 @@
                 "_hex": "0x07"
             }
         },
-        "_id": "channels.0x3EA2a1fED7FdEf300DA19E97092Ce8FdF8bf66A3@0xf911638bA26dd068a7E4a4fA308D6BF1B3556bBA#000005361",
-        "_rev": "10-898fe4caff43308c56afebf5a51635a6"
+        "_id": "channels.0x3EA2a1fED7FdEf300DA19E97092Ce8FdF8bf66A3@0xf911638bA26dd068a7E4a4fA308D6BF1B3556bBA#000005361"
     },
     {
         "channel": "0x3EA2a1fED7FdEf300DA19E97092Ce8FdF8bf66A3@0xf911638bA26dd068a7E4a4fA308D6BF1B3556bBA#000005361",
@@ -302,8 +300,7 @@
             "signature": "0x87d299db8597f4b3726ece0d0ecb7503810ae3dfc3023c0c8a765074660e7c8d3460539b78cad602cefdf4c5f091bb68ca5d615c6dae78090e6af51a84f63dde1b",
             "ts": 1599484287980
         },
-        "_id": "received:0xcba277c0878f4c391518c43043ef123a9d3dec388684fedbe1c3670573407b99",
-        "_rev": "4-86b29dd9cceccf80287348b47aa46e47"
+        "_id": "received:0xcba277c0878f4c391518c43043ef123a9d3dec388684fedbe1c3670573407b99"
     },
     {
         "channel": "0x3EA2a1fED7FdEf300DA19E97092Ce8FdF8bf66A3@0xf911638bA26dd068a7E4a4fA308D6BF1B3556bBA#000005361",
@@ -438,28 +435,23 @@
             "signature": "0x75c9cd9429a4a9ee528c9a8c42e6a112d96665d65daf4a6fe18d334abbc875c84ba8f2d553778aad4c9453c8955dbe5f862cf638fc52b3cf3b5ca81ade1aa4861b",
             "ts": 1599484367950
         },
-        "_id": "sent:0xd3460e3ae468c6cb7e533c691b9a855bea5400bebc7c26bcaa028b0ecc1666a1",
-        "_rev": "6-f741ddb912600698223a05fd58088953"
+        "_id": "sent:0xd3460e3ae468c6cb7e533c691b9a855bea5400bebc7c26bcaa028b0ecc1666a1"
     },
     {
         "value": "0x805CBe7481389d5DC1cA3caD4f66369bc21cb4E3",
-        "_id": "state.address",
-        "_rev": "1-2b4a3935d8c581210dd04e70313017a7"
+        "_id": "state.address"
     },
     {
         "value": 3386946,
-        "_id": "state.blockNumber",
-        "_rev": "92-018cfe5ed034be2e75dde3f4e786794b"
+        "_id": "state.blockNumber"
     },
     {
         "value": 5,
-        "_id": "state.chainId",
-        "_rev": "1-f241345eeea97bdbb89ebf865b855aa2"
+        "_id": "state.chainId"
     },
     {
         "value": {},
-        "_id": "state.config",
-        "_rev": "1-481746ea2522bef5b0e2d2c07a9a778f"
+        "_id": "state.config"
     },
     {
         "value": {
@@ -481,8 +473,7 @@
                 }
             }
         },
-        "_id": "state.iou",
-        "_rev": "2-75d9a04e9253a2657cc1845324f91cb6"
+        "_id": "state.iou"
     },
     {
         "value": [
@@ -503,21 +494,18 @@
                 }
             }
         ],
-        "_id": "state.pendingTxs",
-        "_rev": "3-0691d54314b4c6b3fe6c9043a39da02a"
+        "_id": "state.pendingTxs"
     },
     {
         "value": "0x5a5CF4A63022F61F1506D1A2398490c2e8dfbb98",
-        "_id": "state.registry",
-        "_rev": "1-98116cf280b832a7c25998540f2d4098"
+        "_id": "state.registry"
     },
     {
         "value": {
             "0x59105441977ecD9d805A4f5b060E34676F50F806": "0x3EA2a1fED7FdEf300DA19E97092Ce8FdF8bf66A3",
             "0xC563388e2e2fdD422166eD5E76971D11eD37A466": "0x812650FB6Acdf9dD47E631cBB5518B32FFD4D129"
         },
-        "_id": "state.tokens",
-        "_rev": "3-761b9b21a9c6595909c7dd592337c623"
+        "_id": "state.tokens"
     },
     {
         "value": {
@@ -543,7 +531,6 @@
                 ]
             }
         },
-        "_id": "state.transport",
-        "_rev": "11-7b1a5ce0e3d23f914fe657faa4711569"
+        "_id": "state.transport"
     }
 ]
