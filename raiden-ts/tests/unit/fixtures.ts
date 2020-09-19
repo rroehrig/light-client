@@ -41,6 +41,8 @@ import { Direction, TransferState } from 'raiden-ts/transfers/state';
 import { transfer, transferSecret, transferUnlock } from 'raiden-ts/transfers/actions';
 import { TokenNetwork } from 'raiden-ts/contracts/TokenNetwork';
 import { assert } from 'raiden-ts/utils';
+import { isResponseOf } from 'raiden-ts/utils/actions';
+import { matrixPresence } from 'raiden-ts/transport/actions';
 
 /**
  * Composes several constants used across epics
@@ -250,15 +252,17 @@ export async function ensureTokenIsMonitored(raiden: MockedRaiden): Promise<void
  * @param clients - Clients tuple
  * @param clients.0 - Own raiden
  * @param clients.1 - Partner raiden to open channel with
+ * @param opts - Options
+ * @param opts.channelId - Channel id to use instead of default [id]
  */
-export async function ensureChannelIsOpen([raiden, partner]: [
-  MockedRaiden,
-  MockedRaiden,
-]): Promise<void> {
+export async function ensureChannelIsOpen(
+  [raiden, partner]: [MockedRaiden, MockedRaiden],
+  { channelId = id } = {},
+): Promise<void> {
   await ensureTokenIsMonitored(raiden);
   await ensureTokenIsMonitored(partner);
   if (getChannel(raiden, partner)) return;
-
+  const openBlock = raiden.deps.provider.blockNumber + 1;
   const tokenNetworkContract = raiden.deps.getTokenNetworkContract(tokenNetwork);
   await providersEmit(
     getChannelEventsFilter(tokenNetworkContract),
@@ -266,7 +270,7 @@ export async function ensureChannelIsOpen([raiden, partner]: [
       transactionHash: makeHash(),
       blockNumber: openBlock,
       filter: tokenNetworkContract.filters.ChannelOpened(
-        id,
+        channelId,
         raiden.address,
         partner.address,
         null,
@@ -276,6 +280,7 @@ export async function ensureChannelIsOpen([raiden, partner]: [
   );
   await waitBlock(openBlock);
   await waitBlock(openBlock + confirmationBlocks + 1); // confirmation
+
   assert(getChannel(raiden, partner), 'Raiden channel not open');
   assert(getChannel(partner, raiden), 'Partner channel not open');
 }
@@ -297,7 +302,7 @@ export async function ensureChannelIsDeposited(
   const txHash = makeHash();
   const txBlock = raiden.store.getState().blockNumber + 1;
   const participant = raiden.address;
-
+  const id = getChannel(raiden, partner).id;
   const tokenNetworkContract = raiden.deps.getTokenNetworkContract(tokenNetwork);
   await providersEmit(
     getChannelEventsFilter(tokenNetworkContract),
@@ -331,6 +336,7 @@ export async function ensureChannelIsClosed([raiden, partner]: [
   const closedStates = [ChannelState.closed, ChannelState.settleable, ChannelState.settling];
   await ensureChannelIsOpen([raiden, partner]);
   if (closedStates.includes(getChannel(raiden, partner).state)) return;
+  const id = getChannel(raiden, partner).id;
   const tokenNetworkContract = raiden.deps.getTokenNetworkContract(tokenNetwork);
   await providersEmit(
     getChannelEventsFilter(tokenNetworkContract),
@@ -365,6 +371,7 @@ export async function ensureChannelIsSettled([raiden, partner]: [
 ]): Promise<void> {
   await ensureChannelIsClosed([raiden, partner]);
   if (!getChannel(raiden, partner)) return;
+  const id = getChannel(raiden, partner).id;
   const tokenNetworkContract = raiden.deps.getTokenNetworkContract(tokenNetwork);
   await providersEmit(
     getChannelEventsFilter(tokenNetworkContract),
@@ -488,6 +495,25 @@ export async function ensureTransferUnlocked(
     (doc) => !!doc.unlockProcessed,
   );
   return await sentPromise;
+}
+
+/**
+ * @param clients - Clients tuple
+ * @param clients.0 - We
+ * @param clients.1 - Partner
+ */
+export async function ensurePresence([raiden, partner]: [MockedRaiden, MockedRaiden]): Promise<
+  void
+> {
+  const raidenPromise = raiden.action$
+    .pipe(first(isResponseOf(matrixPresence, { address: partner.address })))
+    .toPromise();
+  const partnerPromise = partner.action$
+    .pipe(first(isResponseOf(matrixPresence, { address: raiden.address })))
+    .toPromise();
+  partner.store.dispatch(matrixPresence.request(undefined, { address: raiden.address }));
+  raiden.store.dispatch(matrixPresence.request(undefined, { address: partner.address }));
+  await Promise.all([raidenPromise, partnerPromise]);
 }
 
 /**

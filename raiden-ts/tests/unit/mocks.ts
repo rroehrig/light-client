@@ -4,7 +4,7 @@ patchVerifyMessage();
 patchEthersDefineReadOnly();
 patchEthersGetNetwork();
 
-import { AsyncSubject, of, BehaviorSubject, ReplaySubject } from 'rxjs';
+import { AsyncSubject, of, BehaviorSubject, ReplaySubject, Observable } from 'rxjs';
 import { filter, take } from 'rxjs/operators';
 import { MatrixClient } from 'matrix-js-sdk';
 import { EventEmitter } from 'events';
@@ -757,6 +757,8 @@ jest.mock('matrix-js-sdk', () => ({
 
 export interface MockedRaiden {
   address: Address;
+  action$: Observable<RaidenAction>;
+  state$: Observable<RaidenState>;
   store: Store<RaidenState, RaidenAction>;
   deps: MockRaidenEpicDeps;
   config: RaidenConfig;
@@ -1140,8 +1142,12 @@ export async function makeRaiden(
     ),
   );
 
+  const state$ = latest$.pipe(pluckDistinct('state'));
+  const action$ = latest$.pipe(pluckDistinct('action'));
   const raiden: MockedRaiden = {
     address,
+    state$,
+    action$,
     store,
     deps,
     output,
